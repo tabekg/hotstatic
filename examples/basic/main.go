@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/tabekg/hotstatic"
@@ -175,8 +177,38 @@ func main() {
 	time.Sleep(100 * time.Millisecond)
 	fmt.Println("Stats after event:", hs.Stats())
 
-	// Запуск HTTP сервера
-	log.Fatal(http.ListenAndServe(":8080", mux))
+	// HTTP сервер с graceful shutdown
+	server := &http.Server{
+		Addr:    ":8080",
+		Handler: mux,
+	}
+
+	// Канал для сигналов завершения
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	// Запуск сервера в горутине
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	// Ожидание сигнала завершения
+	<-quit
+	fmt.Println("\nShutting down...")
+
+	// Контекст с таймаутом для graceful shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Остановка HTTP сервера
+	if err := server.Shutdown(ctx); err != nil {
+		log.Printf("server shutdown error: %v", err)
+	}
+
+	// HotStatic останавливается через defer hs.Stop()
+	fmt.Println("Shutdown complete")
 }
 
 const productTemplate = `<!DOCTYPE html>

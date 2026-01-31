@@ -11,13 +11,12 @@ import (
 )
 
 const (
-	// Redis key prefixes
 	prefixSubscription = "hs:sub:"  // hs:sub:{key} -> set of page paths
 	prefixPage         = "hs:page:" // hs:page:{path} -> page metadata JSON
 	prefixPageSubs     = "hs:psub:" // hs:psub:{path} -> set of subscription keys
 )
 
-// PageMeta stores page metadata in Redis.
+// PageMeta stores page metadata.
 type PageMeta struct {
 	Path          string            `json:"path"`
 	Template      string            `json:"template"`
@@ -35,17 +34,10 @@ type Registry struct {
 
 // Config for Registry.
 type Config struct {
-	// Redis connection string (e.g., "localhost:6379")
-	RedisAddr string
-
-	// Redis password (optional)
+	RedisAddr     string
 	RedisPassword string
-
-	// Redis DB number
-	RedisDB int
-
-	// Key prefix for namespacing (default: "")
-	Prefix string
+	RedisDB       int
+	Prefix        string
 }
 
 // New creates a new Registry.
@@ -81,7 +73,6 @@ func NewWithClient(client *redis.Client, prefix string) *Registry {
 func (r *Registry) Subscribe(ctx context.Context, meta PageMeta) error {
 	pipe := r.client.Pipeline()
 
-	// Store page metadata
 	pageKey := r.key(prefixPage, meta.Path)
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
@@ -89,15 +80,11 @@ func (r *Registry) Subscribe(ctx context.Context, meta PageMeta) error {
 	}
 	pipe.Set(ctx, pageKey, metaJSON, 0)
 
-	// Clear old subscriptions for this page
 	oldSubsKey := r.key(prefixPageSubs, meta.Path)
 	pipe.Del(ctx, oldSubsKey)
 
-	// Add new subscriptions
 	for _, subKey := range meta.Subscriptions {
-		// Add page to subscription set
 		pipe.SAdd(ctx, r.key(prefixSubscription, subKey), meta.Path)
-		// Track which keys this page subscribes to
 		pipe.SAdd(ctx, oldSubsKey, subKey)
 	}
 
@@ -107,7 +94,6 @@ func (r *Registry) Subscribe(ctx context.Context, meta PageMeta) error {
 
 // Unsubscribe removes a page and all its subscriptions.
 func (r *Registry) Unsubscribe(ctx context.Context, pagePath string) error {
-	// Get current subscriptions for this page
 	subsKey := r.key(prefixPageSubs, pagePath)
 	subs, err := r.client.SMembers(ctx, subsKey).Result()
 	if err != nil && err != redis.Nil {
@@ -116,12 +102,10 @@ func (r *Registry) Unsubscribe(ctx context.Context, pagePath string) error {
 
 	pipe := r.client.Pipeline()
 
-	// Remove page from each subscription set
 	for _, subKey := range subs {
 		pipe.SRem(ctx, r.key(prefixSubscription, subKey), pagePath)
 	}
 
-	// Delete page metadata and subscription tracking
 	pipe.Del(ctx, r.key(prefixPage, pagePath))
 	pipe.Del(ctx, subsKey)
 
@@ -194,7 +178,6 @@ func (r *Registry) ListPages(ctx context.Context) ([]string, error) {
 	iter := r.client.Scan(ctx, 0, pattern, 100).Iterator()
 	for iter.Next(ctx) {
 		key := iter.Val()
-		// Extract path from key
 		path := strings.TrimPrefix(key, r.key(prefixPage, ""))
 		pages = append(pages, path)
 	}
@@ -221,7 +204,6 @@ func (r *Registry) ListSubscriptionKeys(ctx context.Context) ([]string, error) {
 func (r *Registry) Stats(ctx context.Context) (map[string]int64, error) {
 	stats := make(map[string]int64)
 
-	// Count pages
 	pagePattern := r.key(prefixPage, "*")
 	pageKeys, err := r.scanCount(ctx, pagePattern)
 	if err != nil {
@@ -229,7 +211,6 @@ func (r *Registry) Stats(ctx context.Context) (map[string]int64, error) {
 	}
 	stats["pages"] = int64(pageKeys)
 
-	// Count subscription keys
 	subPattern := r.key(prefixSubscription, "*")
 	subKeys, err := r.scanCount(ctx, subPattern)
 	if err != nil {
@@ -240,7 +221,7 @@ func (r *Registry) Stats(ctx context.Context) (map[string]int64, error) {
 	return stats, nil
 }
 
-// Clear removes all registry data (use with caution).
+// Clear removes all registry data.
 func (r *Registry) Clear(ctx context.Context) error {
 	patterns := []string{
 		r.key(prefixSubscription, "*"),

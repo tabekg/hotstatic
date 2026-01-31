@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/tabekg/hotstatic"
@@ -188,6 +190,16 @@ func main() {
 	fmt.Println("        -H 'Content-Type: application/json' \\")
 	fmt.Println("        -d '{\"type\":\"product\",\"id\":\"1\",\"action\":\"updated\"}'")
 
+	// HTTP сервер с graceful shutdown
+	server := &http.Server{
+		Addr:    ":8080",
+		Handler: mux,
+	}
+
+	// Канал для сигналов завершения
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
 	// Demo: emit event after 5 seconds
 	go func() {
 		time.Sleep(5 * time.Second)
@@ -195,7 +207,28 @@ func main() {
 		hs.Emit("product:1", "updated")
 	}()
 
-	log.Fatal(http.ListenAndServe(":8080", mux))
+	// Запуск сервера в горутине
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	// Ожидание сигнала завершения
+	<-quit
+	fmt.Println("\n🛑 Shutting down...")
+
+	// Контекст с таймаутом для graceful shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Остановка HTTP сервера
+	if err := server.Shutdown(ctx); err != nil {
+		log.Printf("server shutdown error: %v", err)
+	}
+
+	// HotStatic останавливается через defer hs.Stop()
+	fmt.Println("✅ Shutdown complete")
 }
 
 func registerProductPage(hs *hotstatic.PongoHotStatic) {
