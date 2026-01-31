@@ -38,6 +38,9 @@ type HotStatic struct {
 	pagesFailed     int64
 }
 
+// BuildHandlerFunc is called for each page rebuild job.
+type BuildHandlerFunc func(ctx context.Context, job worker.Job) error
+
 // Config for HotStatic.
 type Config struct {
 	// Redis connection string
@@ -69,6 +72,10 @@ type Config struct {
 
 	// FuncMap custom template functions
 	FuncMap template.FuncMap
+
+	// BuildHandler custom handler for page rebuilds (optional).
+	// If not set, the default handler is used.
+	BuildHandler BuildHandlerFunc
 }
 
 // New creates a new HotStatic instance.
@@ -121,12 +128,18 @@ func New(cfg Config) (*HotStatic, error) {
 		cancel:      cancel,
 	}
 
+	// Use custom handler if provided, otherwise use default
+	handler := hs.buildHandler
+	if cfg.BuildHandler != nil {
+		handler = cfg.BuildHandler
+	}
+
 	// Initialize worker pool
 	hs.pool = worker.NewPool(worker.Config{
 		NumWorkers: cfg.Workers,
 		QueueSize:  cfg.QueueSize,
 		Logger:     cfg.Logger,
-	}, hs.buildHandler)
+	}, handler)
 
 	return hs, nil
 }
@@ -188,6 +201,19 @@ func (hs *HotStatic) Emit(key, action string) error {
 	})
 }
 
+// EmitWithPayload triggers a rebuild with entity data.
+// When payload is provided, DataLoader will NOT be called - the payload is used directly.
+// This is useful when you already have the updated data and want to avoid extra DB queries.
+func (hs *HotStatic) EmitWithPayload(key, action string, payload map[string]any) error {
+	return hs.EmitEvent(Event{
+		Type:      strings.Split(key, ":")[0],
+		ID:        strings.TrimPrefix(key, strings.Split(key, ":")[0]+":"),
+		Action:    action,
+		Payload:   payload,
+		Timestamp: time.Now(),
+	})
+}
+
 // EmitEvent triggers rebuilds for an event.
 func (hs *HotStatic) EmitEvent(event Event) error {
 	atomic.AddInt64(&hs.eventsProcessed, 1)
@@ -202,6 +228,7 @@ func (hs *HotStatic) EmitEvent(event Event) error {
 		slog.String("key", key),
 		slog.String("action", event.Action),
 		slog.Int("subscribers", len(pages)),
+		slog.Bool("has_payload", event.HasPayload()),
 	)
 
 	for _, pagePath := range pages {
@@ -209,6 +236,7 @@ func (hs *HotStatic) EmitEvent(event Event) error {
 			Path:       pagePath,
 			Priority:   event.Priority,
 			TriggerKey: key,
+			Payload:    event.Payload,
 		})
 	}
 
@@ -381,6 +409,7 @@ func (hs *HotStatic) processQueue() {
 				Path:       item.Path,
 				Priority:   item.Priority,
 				TriggerKey: item.TriggerKey,
+				Payload:    item.Payload,
 			})
 		}
 	}
@@ -405,11 +434,15 @@ func (hs *HotStatic) buildHandler(ctx context.Context, job worker.Job) error {
 		return fmt.Errorf("page not found: %s", job.Path)
 	}
 
-	_, err = hs.buildPage(ctx, meta)
+	_, err = hs.buildPageWithPayload(ctx, meta, job.Payload)
 	return err
 }
 
 func (hs *HotStatic) buildPage(ctx context.Context, meta *registry.PageMeta) (*BuildResult, error) {
+	return hs.buildPageWithPayload(ctx, meta, nil)
+}
+
+func (hs *HotStatic) buildPageWithPayload(ctx context.Context, meta *registry.PageMeta, payload map[string]any) (*BuildResult, error) {
 	start := time.Now()
 
 	// Find page config
@@ -427,16 +460,30 @@ func (hs *HotStatic) buildPage(ctx context.Context, meta *registry.PageMeta) (*B
 		return nil, fmt.Errorf("page config not found for template: %s", meta.Template)
 	}
 
-	// Load fresh data
-	data, subs, err := cfg.DataLoader(ctx, meta.Params)
-	if err != nil {
-		return &BuildResult{
-			Page:      Page{Path: meta.Path},
-			Success:   false,
-			Error:     err.Error(),
-			Duration:  time.Since(start),
-			Timestamp: time.Now(),
-		}, err
+	var data any
+	var subs []string
+	var err error
+
+	// Use payload if provided, otherwise call DataLoader
+	if len(payload) > 0 {
+		data = payload
+		subs = meta.Subscriptions // Keep existing subscriptions
+		hs.logger.Debug("using payload data",
+			slog.String("path", meta.Path),
+			slog.Int("payload_keys", len(payload)),
+		)
+	} else {
+		// Load fresh data from DataLoader
+		data, subs, err = cfg.DataLoader(ctx, meta.Params)
+		if err != nil {
+			return &BuildResult{
+				Page:      Page{Path: meta.Path},
+				Success:   false,
+				Error:     err.Error(),
+				Duration:  time.Since(start),
+				Timestamp: time.Now(),
+			}, err
+		}
 	}
 
 	// Update subscriptions if changed

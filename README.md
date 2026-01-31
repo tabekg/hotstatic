@@ -250,20 +250,39 @@ HotStatic uses [pongo2](https://github.com/flosch/pongo2) — a Django/Jinja2-co
 Events represent data changes that may trigger page rebuilds:
 
 ```go
-// Simple emit
+// Simple emit (will call DataLoader to fetch fresh data)
 hs.Emit("product:123", "updated")
 
-// Full event with priority
+// Emit with payload (skips DataLoader, uses provided data directly)
+// This is more efficient when you already have the updated data
+hs.EmitWithPayload("product:123", "updated", map[string]any{
+    "product": updatedProduct,
+    "brand":   brand,
+})
+
+// Full event with priority and payload
 hs.EmitEvent(hotstatic.Event{
     Type:     "product",
     ID:       "123",
     Action:   "updated",
-    Priority: 100, // Higher = rebuild sooner
+    Priority: 100,
+    Payload: map[string]any{
+        "product": updatedProduct,
+    },
 })
 
 // Batch emit
 hs.EmitMulti([]string{"product:1", "product:2", "brand:apple"}, "updated")
 ```
+
+**Payload vs DataLoader:**
+- **Without payload**: Event triggers rebuild → DataLoader is called → fresh data fetched from DB → page rebuilt
+- **With payload**: Event triggers rebuild → payload used directly → no DB query → page rebuilt
+
+Use payload when:
+- You already have the updated data (e.g., after saving to DB)
+- You want to avoid extra database queries
+- The payload contains all data needed for the template
 
 ### Pages & Subscriptions
 

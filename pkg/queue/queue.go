@@ -21,6 +21,10 @@ type Item struct {
 	// TriggerKey that caused this rebuild
 	TriggerKey string
 
+	// Payload contains entity data from the event (optional).
+	// If provided, DataLoader will be skipped.
+	Payload map[string]any
+
 	// index for heap implementation
 	index int
 }

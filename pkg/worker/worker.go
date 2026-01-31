@@ -22,7 +22,11 @@ type Job struct {
 	// TriggerKey that caused this job
 	TriggerKey string
 
-	// Data to pass to handler
+	// Payload contains entity data from the event (optional).
+	// If provided, DataLoader will be skipped.
+	Payload map[string]any
+
+	// Data to pass to handler (deprecated, use Payload)
 	Data any
 }
 

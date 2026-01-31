@@ -169,7 +169,10 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/api/", handler.Router())
 
-	// Serve static files
+	// Serve static assets (JS, CSS, images)
+	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("./static"))))
+
+	// Serve generated pages
 	mux.Handle("/", http.FileServer(http.Dir("./dist")))
 
 	fmt.Println("\n🌐 Server running on http://localhost:8080")

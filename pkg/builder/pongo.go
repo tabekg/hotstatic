@@ -43,11 +43,8 @@ func NewPongoBuilder(cfg PongoConfig) (*PongoBuilder, error) {
 		outputDir:   cfg.OutputDir,
 	}
 
-	if cfg.TemplateDir != "" {
-		if err := b.LoadTemplates(); err != nil {
-			return nil, err
-		}
-	}
+	// Don't pre-parse templates - load on demand
+	// This allows templates with includes to work properly
 
 	return b, nil
 }

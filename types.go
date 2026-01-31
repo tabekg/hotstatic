@@ -22,8 +22,18 @@ type Event struct {
 	// Priority for rebuild queue (higher = more urgent)
 	Priority int `json:"priority"`
 
-	// Metadata for additional context
+	// Payload contains the entity data (optional).
+	// If provided, DataLoader will not be called and this data will be used directly.
+	// This avoids extra database queries when you already have the data.
+	Payload map[string]any `json:"payload,omitempty"`
+
+	// Metadata for additional context (not passed to template)
 	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+// HasPayload returns true if the event contains payload data.
+func (e Event) HasPayload() bool {
+	return len(e.Payload) > 0
 }
 
 // Key returns the subscription key for this event (e.g., "product:123")

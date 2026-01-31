@@ -10,6 +10,7 @@ import (
 	"github.com/flosch/pongo2/v6"
 	"github.com/tabekg/hotstatic/pkg/builder"
 	"github.com/tabekg/hotstatic/pkg/registry"
+	"github.com/tabekg/hotstatic/pkg/worker"
 )
 
 // PongoPageConfig defines a page that uses pongo2 templates.
@@ -44,25 +45,35 @@ type PongoHotStatic struct {
 
 // NewWithPongo creates HotStatic with pongo2 (Django/Jinja2) support.
 func NewWithPongo(cfg Config) (*PongoHotStatic, error) {
+	// Save TemplateDir for pongo, but don't pass to base HotStatic
+	// (base uses html/template which can't parse pongo2 syntax)
+	pongoTemplateDir := cfg.TemplateDir
+	cfg.TemplateDir = ""
+
+	// Create pongo builder first
+	pongoBuilder, err := builder.NewPongoBuilder(builder.PongoConfig{
+		TemplateDir: pongoTemplateDir,
+		OutputDir:   cfg.OutputDir,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("init pongo builder: %w", err)
+	}
+
+	// Pre-create PongoHotStatic so we can reference it in the handler
+	phs := &PongoHotStatic{
+		pongoBuilder: pongoBuilder,
+		pongoConfigs: make(map[string]*PongoPageConfig),
+	}
+
+	// Set custom build handler that knows about pongo configs
+	cfg.BuildHandler = phs.pongoBuildHandler
+
 	hs, err := New(cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	pongoBuilder, err := builder.NewPongoBuilder(builder.PongoConfig{
-		TemplateDir: cfg.TemplateDir,
-		OutputDir:   cfg.OutputDir,
-	})
-	if err != nil {
-		hs.Stop()
-		return nil, fmt.Errorf("init pongo builder: %w", err)
-	}
-
-	phs := &PongoHotStatic{
-		HotStatic:    hs,
-		pongoBuilder: pongoBuilder,
-		pongoConfigs: make(map[string]*PongoPageConfig),
-	}
+	phs.HotStatic = hs
 
 	// Register default filters
 	phs.registerDefaultFilters()
@@ -146,6 +157,11 @@ func (phs *PongoHotStatic) GeneratePongoPages(ctx context.Context, configName st
 
 // BuildPongoPage rebuilds a single pongo2 page.
 func (phs *PongoHotStatic) BuildPongoPage(ctx context.Context, pagePath string) (*BuildResult, error) {
+	return phs.BuildPongoPageWithPayload(ctx, pagePath, nil)
+}
+
+// BuildPongoPageWithPayload rebuilds a page using provided payload or DataLoader.
+func (phs *PongoHotStatic) BuildPongoPageWithPayload(ctx context.Context, pagePath string, payload map[string]any) (*BuildResult, error) {
 	meta, err := phs.registry.GetPage(ctx, pagePath)
 	if err != nil {
 		return nil, err
@@ -178,16 +194,29 @@ func (phs *PongoHotStatic) BuildPongoPage(ctx context.Context, pagePath string) 
 
 	start := time.Now()
 
-	// Load fresh data
-	data, subs, err := cfg.DataLoader(ctx, meta.Params)
-	if err != nil {
-		return &BuildResult{
-			Page:      Page{Path: meta.Path},
-			Success:   false,
-			Error:     err.Error(),
-			Duration:  time.Since(start),
-			Timestamp: time.Now(),
-		}, err
+	var data map[string]any
+	var subs []string
+
+	// Use payload if provided, otherwise call DataLoader
+	if len(payload) > 0 {
+		data = payload
+		subs = meta.Subscriptions
+		phs.logger.Debug("using payload data",
+			"path", meta.Path,
+			"payload_keys", len(payload),
+		)
+	} else {
+		// Load fresh data from DataLoader
+		data, subs, err = cfg.DataLoader(ctx, meta.Params)
+		if err != nil {
+			return &BuildResult{
+				Page:      Page{Path: meta.Path},
+				Success:   false,
+				Error:     err.Error(),
+				Duration:  time.Since(start),
+				Timestamp: time.Now(),
+			}, err
+		}
 	}
 
 	// Update subscriptions if changed
@@ -251,6 +280,27 @@ func (phs *PongoHotStatic) AddGlobal(name string, value any) {
 // ReloadTemplates reloads all templates from disk.
 func (phs *PongoHotStatic) ReloadTemplates() error {
 	return phs.pongoBuilder.LoadTemplates()
+}
+
+// pongoBuildHandler handles page rebuild jobs for both pongo and standard pages.
+func (phs *PongoHotStatic) pongoBuildHandler(ctx context.Context, job worker.Job) error {
+	meta, err := phs.registry.GetPage(ctx, job.Path)
+	if err != nil {
+		return err
+	}
+	if meta == nil {
+		return fmt.Errorf("page not found: %s", job.Path)
+	}
+
+	// Check if it's a pongo page
+	if strings.HasPrefix(meta.Template, "pongo:") {
+		_, err = phs.BuildPongoPageWithPayload(ctx, job.Path, job.Payload)
+		return err
+	}
+
+	// Fall back to base handler for non-pongo pages
+	_, err = phs.buildPageWithPayload(ctx, meta, job.Payload)
+	return err
 }
 
 func (phs *PongoHotStatic) registerDefaultFilters() {

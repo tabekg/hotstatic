@@ -4,12 +4,12 @@
 
 <nav class="breadcrumb" aria-label="Breadcrumb">
     <ol>
-        {% for item in items %}
+        {% for crumb in items %}
         <li>
-            {% if item.url %}
-            <a href="{{ item.url }}">{{ item.label }}</a>
+            {% if crumb.url %}
+            <a href="{{ crumb.url }}">{{ crumb.label }}</a>
             {% else %}
-            <span aria-current="page">{{ item.label }}</span>
+            <span aria-current="page">{{ crumb.label }}</span>
             {% endif %}
         </li>
         {% endfor %}
