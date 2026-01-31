@@ -1,4 +1,4 @@
-{% extends "layouts/base.html" %}
+{% extends "layouts/base.jinja2" %}
 
 {% block title %}HotStatic Store - Home{% endblock %}
 
@@ -161,8 +161,8 @@
     <h1>Welcome to HotStatic</h1>
     <p>Lightning-fast static e-commerce powered by reactive rebuilds. When data changes, pages rebuild automatically.</p>
     <div class="hero-buttons">
-        <a href="/categories/phones.html" class="btn btn-primary">Shop Phones</a>
-        <a href="/categories/laptops.html" class="btn btn-secondary">Shop Laptops</a>
+        <a href="/categories/phones.jinja2" class="btn btn-primary">Shop Phones</a>
+        <a href="/categories/laptops.jinja2" class="btn btn-secondary">Shop Laptops</a>
     </div>
 </section>
 
@@ -172,7 +172,7 @@
     </div>
     <div class="categories-grid">
         {% for category in categories %}
-        <a href="/categories/{{ category.ID }}.html" class="category-card">
+        <a href="/categories/{{ category.ID }}.jinja2" class="category-card">
             <div class="category-icon">
                 {% if category.ID == "phones" %}📱{% elif category.ID == "laptops" %}💻{% else %}📦{% endif %}
             </div>
@@ -193,7 +193,7 @@
     </div>
     <div class="products-grid">
         {% for product in featured_products %}
-        {% include "components/product-card.html" with product=product %}
+        {% include "components/product-card.jinja2" with product=product %}
         {% endfor %}
     </div>
 </section>

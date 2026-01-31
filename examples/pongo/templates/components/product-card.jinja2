@@ -1,8 +1,8 @@
 {# Product Card Component #}
-{# Usage: {% include "components/product-card.html" with product=product %} #}
+{# Usage: {% include "components/product-card.jinja2" with product=product %} #}
 
 <article class="product-card">
-    <a href="/products/{{ product.ID }}.html" class="product-image">
+    <a href="/products/{{ product.ID }}.jinja2" class="product-image">
         <div class="product-placeholder">{{ product.Name|first }}</div>
         {% if not product.InStock %}
         <span class="product-overlay">Out of Stock</span>
@@ -11,7 +11,7 @@
     <div class="product-body">
         <span class="product-brand">{{ product.BrandName }}</span>
         <h3 class="product-title">
-            <a href="/products/{{ product.ID }}.html">{{ product.Name }}</a>
+            <a href="/products/{{ product.ID }}.jinja2">{{ product.Name }}</a>
         </h3>
         <div class="product-footer">
             <span class="product-price">{{ product.Price|price }}</span>
