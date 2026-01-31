@@ -246,6 +246,59 @@ func (h *HTTPHandler) getSubscriberCount(key string) int {
 	return len(subs)
 }
 
+// StaticHandler serves generated static files with custom 404 page support.
+type StaticHandler struct {
+	outputDir    string
+	notFoundPage string
+}
+
+// NewStaticHandler creates a static file server.
+// notFoundPage is the path to custom 404 page relative to outputDir (e.g., "404.html").
+// If empty, standard 404 response is returned.
+func NewStaticHandler(outputDir string, notFoundPage string) *StaticHandler {
+	return &StaticHandler{
+		outputDir:    outputDir,
+		notFoundPage: notFoundPage,
+	}
+}
+
+// StaticHandler returns a static file handler using OutputDir and NotFoundPage from config.
+func (hs *HotStatic) StaticHandler() *StaticHandler {
+	return NewStaticHandler(hs.config.OutputDir, hs.config.NotFoundPage)
+}
+
+// ServeHTTP implements http.Handler.
+func (s *StaticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
+	if path == "/" {
+		path = "/index.html"
+	}
+
+	fullPath := s.outputDir + path
+
+	// Check if file exists
+	if _, err := http.Dir(s.outputDir).Open(path); err != nil {
+		s.serve404(w, r)
+		return
+	}
+
+	http.ServeFile(w, r, fullPath)
+}
+
+func (s *StaticHandler) serve404(w http.ResponseWriter, r *http.Request) {
+	if s.notFoundPage != "" {
+		notFoundPath := s.outputDir + "/" + s.notFoundPage
+		if content, err := http.Dir(s.outputDir).Open("/" + s.notFoundPage); err == nil {
+			content.Close()
+			w.WriteHeader(http.StatusNotFound)
+			http.ServeFile(w, r, notFoundPath)
+			return
+		}
+	}
+
+	http.NotFound(w, r)
+}
+
 // Webhook provides webhook integration.
 type Webhook struct {
 	hs     *HotStatic

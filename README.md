@@ -99,6 +99,9 @@ hotstatic.Config{
     // Output directory for HTML
     OutputDir:     "./dist",
 
+    // Custom 404 page (relative to OutputDir)
+    NotFoundPage:  "404.html",
+
     // Performance
     Workers:       4,                 // parallel workers
     QueueSize:     10000,             // queue size
@@ -260,6 +263,62 @@ hs.AddGlobal("current_year", time.Now().Year())
 ```
 
 Usage: `<title>{{ site_name }}</title>`
+
+## Serving Static Files
+
+```go
+mux := http.NewServeMux()
+
+// API endpoints
+handler := hotstatic.NewHTTPHandler(hs.HotStatic)
+mux.Handle("/api/", handler.Router())
+
+// Serve generated pages with custom 404
+mux.Handle("/", hs.StaticHandler())
+
+http.ListenAndServe(":8080", mux)
+```
+
+### Custom 404 Page
+
+1. Create template `templates/pages/404.jinja2`:
+
+```html
+{% extends "layouts/base.html" %}
+
+{% block title %}Page Not Found{% endblock %}
+
+{% block content %}
+<div class="error-page">
+    <h1>404</h1>
+    <p>Page not found</p>
+    <a href="/">Go Home</a>
+</div>
+{% endblock %}
+```
+
+2. Generate 404 page at startup:
+
+```go
+err = hs.GeneratePongoPage(ctx, hotstatic.Page{
+    Path:          "/404.html",
+    Template:      "pages/404.jinja2",
+    Subscriptions: []string{}, // no subscriptions needed
+}, map[string]any{
+    "title": "Page Not Found",
+})
+```
+
+3. Set in config:
+
+```go
+hotstatic.Config{
+    // ...
+    NotFoundPage: "404.html",
+}
+```
+
+Now any non-existent URL will show your custom 404 page with HTTP status 404.
 
 ## HTTP API
 

@@ -60,6 +60,10 @@ type Config struct {
 	// OutputDir for generated files
 	OutputDir string
 
+	// NotFoundPage is the path to custom 404 page relative to OutputDir (e.g., "404.html").
+	// Used by StaticHandler when serving files.
+	NotFoundPage string
+
 	// Workers count for parallel building
 	Workers int
 
