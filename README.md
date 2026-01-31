@@ -1,35 +1,20 @@
 # HotStatic
 
-A universal Static Site Generator (SSG) framework with reactive rebuild capabilities. When any data changes, all dependent pages are automatically rebuilt.
+A static site generator framework with reactive page rebuilds. When data changes, only affected pages are rebuilt.
 
-## Features
+## Use Cases
 
-- **Reactive Rebuilds** — Pages subscribe to data keys; when data changes, only affected pages rebuild
-- **Django/Jinja2 Templates** — Familiar syntax with `{% extends %}`, `{% block %}`, `{% include %}`, `{% for %}`, `{% if %}`
-- **Universal** — Not tied to any specific domain; works for e-commerce, news sites, travel, cinema, etc.
-- **Fast** — Built with Go, Redis, and parallel worker pools
-- **Simple API** — Minimal integration effort with intuitive patterns
-- **Scalable** — Handles millions of pages and thousands of events per second
-- **Priority Queue** — Urgent pages rebuild first
-- **HTTP API** — REST endpoints for events, webhooks, and monitoring
+- Classifieds / Marketplaces
+- E-commerce catalogs
+- News sites
+- Any content that changes rarely but needs to load fast
 
-## Architecture
+## Benefits
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                      HotStatic                          │
-├─────────────────────────────────────────────────────────┤
-│  Event          Data change notification                │
-│       ↓                                                 │
-│  Registry       Redis-based subscription management     │
-│       ↓                                                 │
-│  Queue          Priority queue for rebuild tasks        │
-│       ↓                                                 │
-│  Workers        Parallel page builders                  │
-│       ↓                                                 │
-│  Builder        Template rendering & file output        │
-└─────────────────────────────────────────────────────────┘
-```
+- **Fast** — Browser receives ready HTML (5-10ms instead of 100-500ms)
+- **SEO** — Search engines see full content immediately
+- **Cheap** — Static files can be served from CDN
+- **Reactive** — Product changed → only its page rebuilds
 
 ## Installation
 
@@ -54,149 +39,192 @@ import (
 )
 
 func main() {
-    // Initialize HotStatic with pongo2 (Django/Jinja2 templates)
+    // Initialize
     hs, err := hotstatic.NewWithPongo(hotstatic.Config{
         Redis:       "localhost:6379",
         TemplateDir: "./templates",
         OutputDir:   "./dist",
-        Workers:     10,
+        Workers:     4,
     })
     if err != nil {
         log.Fatal(err)
     }
     defer hs.Stop()
 
-    // Register page configuration
-    hs.RegisterPongoPage("product-detail", hotstatic.PongoPageConfig{
-        PathPattern: "/products/{id}.html",
-        Template:    "pages/product.html",
-        DataLoader: func(ctx context.Context, params map[string]string) (map[string]any, []string, error) {
-            product := getProduct(params["id"])
-
-            // Template context
-            data := map[string]any{
-                "product": product,
-                "breadcrumb": []map[string]string{
-                    {"label": "Home", "url": "/"},
-                    {"label": product.Category, "url": "/categories/" + product.CategoryID + ".html"},
-                    {"label": product.Name, "url": ""},
-                },
-            }
-
-            // Subscription keys - page depends on these
-            subscriptions := []string{
-                "product:" + product.ID,
-                "brand:" + product.BrandID,
-                "category:" + product.CategoryID,
-            }
-
-            return data, subscriptions, nil
-        },
-    })
-
-    // Start processing
+    // Start workers
     hs.Start()
 
-    // Generate initial pages
-    hs.GeneratePongoPages(context.Background(), "product-detail", []string{"1", "2", "3"})
+    ctx := context.Background()
 
-    // When data changes, emit an event
-    // All pages subscribed to "product:123" will rebuild automatically
-    hs.Emit("product:123", "updated")
+    // Generate a page with data
+    data := map[string]any{
+        "product": Product{ID: "1", Name: "iPhone 15", Price: 999},
+        "brand":   "Apple",
+    }
+    
+    subscriptions := []string{
+        "product:1",    // page depends on this product
+        "brand:apple",  // and this brand
+    }
+
+    err = hs.GeneratePongoPage(ctx, hotstatic.Page{
+        Path:          "/products/1.html",
+        Template:      "pages/product.html",
+        Subscriptions: subscriptions,
+        Params:        map[string]string{"id": "1"},
+    }, data)
+
+    // When data changes — emit event with new data
+    hs.EmitWithPayload("product:1", "updated", map[string]any{
+        "product": Product{ID: "1", Name: "iPhone 15 Pro", Price: 1099},
+        "brand":   "Apple",
+    })
+    // All pages subscribed to "product:1" will rebuild automatically
 }
 ```
 
-## Template Syntax (Django/Jinja2)
+## Configuration
 
-HotStatic uses [pongo2](https://github.com/flosch/pongo2) — a Django/Jinja2-compatible template engine.
+```go
+hotstatic.Config{
+    // Redis (required)
+    Redis:         "localhost:6379",
+    RedisPassword: "",                // optional
+    RedisDB:       0,                 // database number
+    RedisPrefix:   "hs",              // key prefix
 
-### Template Inheritance
+    // Templates
+    TemplateDir:   "./templates",
 
-**layouts/base.html:**
+    // Output directory for HTML
+    OutputDir:     "./dist",
+
+    // Performance
+    Workers:       4,                 // parallel workers
+    QueueSize:     10000,             // queue size
+
+    // Logging
+    Logger:        slog.Default(),
+}
+```
+
+## API
+
+### Generate a Page
+
+```go
+// Data for template
+data := map[string]any{
+    "product": product,
+    "brand":   brand,
+}
+
+// Subscriptions (page rebuilds when these keys change)
+subscriptions := []string{"product:123", "brand:apple"}
+
+// Generate
+err := hs.GeneratePongoPage(ctx, hotstatic.Page{
+    Path:          "/products/123.html",
+    Template:      "pages/product.html",
+    Subscriptions: subscriptions,
+    Params:        map[string]string{"id": "123"},
+}, data)
+```
+
+### Emit Event (Trigger Rebuild)
+
+```go
+// Product updated — send new data
+hs.EmitWithPayload("product:123", "updated", map[string]any{
+    "product": updatedProduct,
+    "brand":   brand,
+})
+
+// All pages subscribed to "product:123" will rebuild
+```
+
+### Event with Priority
+
+```go
+hs.EmitEvent(hotstatic.Event{
+    Type:     "product",
+    ID:       "123",
+    Action:   "updated",
+    Priority: 100,  // higher = more urgent
+    Payload: map[string]any{
+        "product": product,
+    },
+})
+```
+
+### List Pages
+
+```go
+pages, err := hs.ListPages(ctx)
+// ["/products/1.html", "/products/2.html", "/categories/phones.html"]
+```
+
+### Delete Page
+
+```go
+err := hs.Unsubscribe(ctx, "/products/123.html")
+```
+
+## Templates (Pongo2 / Django / Jinja2)
+
+### Base Layout
+
+**templates/layouts/base.html:**
 ```html
 <!DOCTYPE html>
 <html>
 <head>
     <title>{% block title %}My Site{% endblock %}</title>
-    {% block head %}{% endblock %}
 </head>
 <body>
-    <header>
-        <nav>
-            <a href="/" {% if active_nav == 'home' %}class="active"{% endif %}>Home</a>
-            <a href="/products/" {% if active_nav == 'products' %}class="active"{% endif %}>Products</a>
-        </nav>
-    </header>
-
+    <header>{% include "components/header.html" %}</header>
+    
     <main>
         {% block content %}{% endblock %}
     </main>
-
-    <footer>
-        Generated: {{ _generated_at|date:"Y-m-d H:i:s" }}
-    </footer>
+    
+    <footer>Generated: {{ _generated_at|date:"Y-m-d H:i:s" }}</footer>
 </body>
 </html>
 ```
 
-**pages/product.html:**
+### Product Page
+
+**templates/pages/product.html:**
 ```html
 {% extends "layouts/base.html" %}
 
-{% block title %}{{ product.Name }} - My Store{% endblock %}
+{% block title %}{{ product.Name }}{% endblock %}
 
 {% block content %}
-    {% include "components/breadcrumb.html" with items=breadcrumb %}
-
     <h1>{{ product.Name }}</h1>
-    <p class="brand">{{ product.BrandName }}</p>
     <p class="price">{{ product.Price|price }}</p>
-
     <p>{{ product.Description }}</p>
-
+    
+    {% if product.InStock %}
+        <button>Buy Now</button>
+    {% else %}
+        <span>Out of Stock</span>
+    {% endif %}
+    
     {% if product.Features %}
-    <ul class="features">
+    <ul>
         {% for feature in product.Features %}
         <li>{{ feature }}</li>
         {% endfor %}
     </ul>
     {% endif %}
-
-    {% if product.InStock %}
-        <button class="btn-primary">Add to Cart</button>
-    {% else %}
-        <span class="badge badge-danger">Out of Stock</span>
-    {% endif %}
 {% endblock %}
-```
-
-### Include Components
-
-**components/product-card.html:**
-```html
-{# Usage: {% include "components/product-card.html" with product=item %} #}
-
-<article class="product-card">
-    <a href="/products/{{ product.ID }}.html">
-        <h3>{{ product.Name }}</h3>
-        <span class="brand">{{ product.BrandName }}</span>
-        <span class="price">{{ product.Price|price }}</span>
-    </a>
-</article>
-```
-
-**Usage in pages:**
-```html
-<div class="products-grid">
-    {% for product in products %}
-        {% include "components/product-card.html" with product=product %}
-    {% endfor %}
-</div>
 ```
 
 ### Built-in Filters
 
-| Filter | Example | Output |
+| Filter | Example | Result |
 |--------|---------|--------|
 | `price` | `{{ 99.99\|price }}` | `$99.99` |
 | `truncate` | `{{ text\|truncate:100 }}` | Truncated text... |
@@ -205,240 +233,12 @@ HotStatic uses [pongo2](https://github.com/flosch/pongo2) — a Django/Jinja2-co
 | `date` | `{{ date\|date:"Y-m-d" }}` | 2024-01-15 |
 | `default` | `{{ value\|default:"N/A" }}` | N/A if empty |
 | `length` | `{{ items\|length }}` | 5 |
-| `first` | `{{ items\|first }}` | First item |
-| `last` | `{{ items\|last }}` | Last item |
 | `join` | `{{ items\|join:", " }}` | a, b, c |
 | `upper` | `{{ text\|upper }}` | TEXT |
 | `lower` | `{{ text\|lower }}` | text |
-| `title` | `{{ text\|title }}` | Title Text |
 | `safe` | `{{ html\|safe }}` | Unescaped HTML |
 
-### Control Structures
-
-```html
-{# If/Else #}
-{% if user.is_admin %}
-    <a href="/admin/">Admin Panel</a>
-{% elif user.is_logged_in %}
-    <a href="/profile/">Profile</a>
-{% else %}
-    <a href="/login/">Login</a>
-{% endif %}
-
-{# For Loop #}
-{% for item in items %}
-    <p>{{ forloop.Counter }}. {{ item.name }}</p>
-    {% if forloop.First %}(First!){% endif %}
-    {% if forloop.Last %}(Last!){% endif %}
-{% empty %}
-    <p>No items found.</p>
-{% endfor %}
-
-{# With (set variable) #}
-{% with total=cart.items|length %}
-    <p>You have {{ total }} items</p>
-{% endwith %}
-
-{# Comments #}
-{# This is a comment #}
-```
-
-## Core Concepts
-
-### Events
-
-Events represent data changes that may trigger page rebuilds:
-
-```go
-// Simple emit (will call DataLoader to fetch fresh data)
-hs.Emit("product:123", "updated")
-
-// Emit with payload (skips DataLoader, uses provided data directly)
-// This is more efficient when you already have the updated data
-hs.EmitWithPayload("product:123", "updated", map[string]any{
-    "product": updatedProduct,
-    "brand":   brand,
-})
-
-// Full event with priority and payload
-hs.EmitEvent(hotstatic.Event{
-    Type:     "product",
-    ID:       "123",
-    Action:   "updated",
-    Priority: 100,
-    Payload: map[string]any{
-        "product": updatedProduct,
-    },
-})
-
-// Batch emit
-hs.EmitMulti([]string{"product:1", "product:2", "brand:apple"}, "updated")
-```
-
-**Payload vs DataLoader:**
-- **Without payload**: Event triggers rebuild → DataLoader is called → fresh data fetched from DB → page rebuilt
-- **With payload**: Event triggers rebuild → payload used directly → no DB query → page rebuilt
-
-Use payload when:
-- You already have the updated data (e.g., after saving to DB)
-- You want to avoid extra database queries
-- The payload contains all data needed for the template
-
-### Pages & Subscriptions
-
-Pages subscribe to data keys. When an event matches a subscription, the page rebuilds:
-
-```go
-hs.RegisterPongoPage("product-detail", hotstatic.PongoPageConfig{
-    PathPattern: "/products/{id}.html",
-    Template:    "pages/product.html",
-    DataLoader: func(ctx context.Context, params map[string]string) (map[string]any, []string, error) {
-        product := db.GetProduct(params["id"])
-
-        // This page depends on:
-        subscriptions := []string{
-            "product:" + product.ID,          // The product itself
-            "brand:" + product.BrandID,       // Its brand (name/logo changes)
-            "category:" + product.CategoryID, // Its category
-            "currency:usd",                   // Currency rates
-        }
-
-        return map[string]any{"product": product}, subscriptions, nil
-    },
-})
-```
-
-### DataLoader
-
-The `DataLoader` function is called during page generation and rebuild:
-
-```go
-DataLoader: func(ctx context.Context, params map[string]string) (data map[string]any, subscriptions []string, err error)
-```
-
-- `params` — Extracted from `PathPattern` (e.g., `{id}` → `params["id"]`)
-- `data` — Template context (available as variables in template)
-- `subscriptions` — Keys this page depends on
-- Returns fresh data on every rebuild
-
-## Use Cases
-
-| Project | Entities |
-|---------|----------|
-| E-commerce | product, brand, category, stock, price |
-| Classifieds | ad, seller, category, city, price |
-| News Site | article, author, tag, section |
-| Travel | tour, hotel, destination, guide |
-| Cinema | movie, cinema, showtime, actor |
-
-## HTTP API
-
-Start the HTTP server:
-
-```go
-handler := hotstatic.NewHTTPHandler(hs.HotStatic)
-http.ListenAndServe(":8080", handler.Router())
-```
-
-### Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/events` | Emit single event |
-| POST | `/api/events/batch` | Emit multiple events |
-| POST | `/api/build` | Rebuild specific page |
-| POST | `/api/build/all` | Rebuild all pages |
-| GET | `/api/stats` | Get statistics |
-| GET | `/api/pages` | List all pages |
-| GET | `/api/pages/{path}` | Get page metadata |
-| DELETE | `/api/pages/{path}` | Delete a page |
-| GET | `/api/health` | Health check |
-
-### Examples
-
-**Emit an event:**
-```bash
-curl -X POST http://localhost:8080/api/events \
-  -H "Content-Type: application/json" \
-  -d '{"type": "product", "id": "123", "action": "updated"}'
-```
-
-**Batch events:**
-```bash
-curl -X POST http://localhost:8080/api/events/batch \
-  -H "Content-Type: application/json" \
-  -d '{
-    "events": [
-      {"type": "product", "id": "1", "action": "updated"},
-      {"type": "product", "id": "2", "action": "updated"},
-      {"type": "brand", "id": "apple", "action": "updated"}
-    ]
-  }'
-```
-
-**Get statistics:**
-```bash
-curl http://localhost:8080/api/stats
-```
-
-Response:
-```json
-{
-  "pages_total": 15420,
-  "pages_built": 342,
-  "pages_failed": 2,
-  "events_processed": 1893,
-  "queue_length": 12,
-  "workers_active": 8,
-  "uptime": "2h15m30s"
-}
-```
-
-## Webhooks
-
-Integrate with external systems:
-
-```go
-webhook := hotstatic.NewWebhook(hs.HotStatic, "your-secret-token")
-http.Handle("/webhook", webhook.Handler())
-```
-
-Send events from external services:
-```bash
-curl -X POST http://localhost:8080/webhook \
-  -H "Authorization: Bearer your-secret-token" \
-  -H "Content-Type: application/json" \
-  -d '{"type": "product", "id": "123", "action": "updated"}'
-```
-
-## Configuration
-
-```go
-hotstatic.Config{
-    // Redis connection
-    Redis:         "localhost:6379",
-    RedisPassword: "",
-    RedisDB:       0,
-    RedisPrefix:   "myapp", // Key namespace
-
-    // Templates
-    TemplateDir:   "./templates",
-
-    // Output
-    OutputDir:     "./dist",
-
-    // Performance
-    Workers:       10,      // Parallel workers
-    QueueSize:     10000,   // Queue buffer
-
-    // Logging
-    Logger:        slog.Default(),
-}
-```
-
-## Custom Filters
-
-Add your own template filters:
+### Custom Filter
 
 ```go
 hs.AddFilter("currency", func(in *pongo2.Value, param *pongo2.Value) (*pongo2.Value, *pongo2.Error) {
@@ -450,11 +250,9 @@ hs.AddFilter("currency", func(in *pongo2.Value, param *pongo2.Value) (*pongo2.Va
 })
 ```
 
-Usage: `{{ price|currency:"€" }}` → `€99.99`
+Usage: `{{ price|currency:"EUR " }}` → `EUR 99.99`
 
-## Global Variables
-
-Add variables available in all templates:
+### Global Variables
 
 ```go
 hs.AddGlobal("site_name", "My Store")
@@ -463,43 +261,180 @@ hs.AddGlobal("current_year", time.Now().Year())
 
 Usage: `<title>{{ site_name }}</title>`
 
+## HTTP API
+
+```go
+handler := hotstatic.NewHTTPHandler(hs.HotStatic)
+http.ListenAndServe(":8080", handler.Router())
+```
+
+### Endpoints
+
+| Method | URL | Description |
+|--------|-----|-------------|
+| POST | `/api/events` | Emit event |
+| POST | `/api/events/batch` | Emit multiple events |
+| POST | `/api/build` | Rebuild a page |
+| GET | `/api/stats` | Statistics |
+| GET | `/api/pages` | List pages |
+| GET | `/api/pages/{path}` | Page info |
+| DELETE | `/api/pages/{path}` | Delete page |
+| GET | `/api/health` | Health check |
+
+### Examples
+
+**Emit event:**
+```bash
+curl -X POST http://localhost:8080/api/events \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "product",
+    "id": "123",
+    "action": "updated",
+    "payload": {
+      "product": {"id": "123", "name": "iPhone", "price": 999}
+    }
+  }'
+```
+
+**Rebuild page:**
+```bash
+curl -X POST http://localhost:8080/api/build \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/products/123.html",
+    "payload": {
+      "product": {"id": "123", "name": "iPhone", "price": 999}
+    }
+  }'
+```
+
+**Statistics:**
+```bash
+curl http://localhost:8080/api/stats
+```
+
+```json
+{
+  "pages_total": 15420,
+  "pages_built": 342,
+  "pages_failed": 2,
+  "events_processed": 1893,
+  "queue_length": 12,
+  "workers_active": 4,
+  "uptime": "2h15m30s"
+}
+```
+
+## Webhook
+
+```go
+webhook := hotstatic.NewWebhook(hs.HotStatic, "secret-token")
+http.Handle("/webhook", webhook.Handler())
+```
+
+```bash
+curl -X POST http://localhost:8080/webhook \
+  -H "Authorization: Bearer secret-token" \
+  -H "Content-Type: application/json" \
+  -d '{"type": "product", "id": "123", "action": "updated"}'
+```
+
+## Client-side Router (SPA-like Navigation)
+
+HotStatic includes a JavaScript router for smooth transitions between static pages.
+
+### Setup
+
+```html
+<script>
+window.HotStaticConfig = {
+    contentSelector: 'main',
+    progressBar: {
+        enabled: true,
+        color: '#3b82f6',
+        height: '3px',
+        position: 'top',
+    },
+    prefetch: {
+        enabled: true,
+        on: 'hover',  // 'hover' | 'visible' | 'both'
+        delay: 100,
+    },
+    cache: {
+        enabled: true,
+        maxPages: 20,
+        ttl: 300,  // seconds
+    },
+    navigation: {
+        transition: 'fade',  // 'fade' | 'slide' | 'none'
+        duration: 150,
+    },
+};
+</script>
+<script src="/static/js/router.js"></script>
+```
+
+### Events
+
+```js
+// Before navigation (cancelable)
+document.addEventListener('hs:beforeNavigate', (e) => {
+    console.log('Leaving:', e.detail.from);
+    console.log('Going to:', e.detail.to);
+    // e.preventDefault(); // cancel navigation
+});
+
+// After navigation
+document.addEventListener('hs:afterNavigate', (e) => {
+    console.log('Navigated to:', e.detail.to);
+    window.scrollTo(0, 0); // scroll to top if needed
+});
+
+// Page prefetched
+document.addEventListener('hs:prefetch', (e) => {
+    console.log('Prefetched:', e.detail.url);
+});
+```
+
+### JavaScript API
+
+```js
+HotStatic.navigate('/products/1.html');  // navigate
+HotStatic.prefetch('/about.html');        // prefetch
+HotStatic.clearCache();                   // clear cache
+HotStatic.getCachedUrls();                // get cached URLs
+HotStatic.getConfig();                    // get current config
+```
+
+### Ignore Link
+
+```html
+<a href="/external" data-hs-ignore>Normal navigation</a>
+```
+
 ## Project Structure
 
 ```
-hotstatic/
-├── go.mod
-├── types.go           # Core types: Event, Page, interfaces
-├── hotstatic.go       # Main API (html/template)
-├── pongo.go           # Pongo2 integration (Django/Jinja2)
-├── http.go            # HTTP API & webhooks
-├── pkg/
-│   ├── registry/      # Redis subscription management
-│   ├── builder/       # Template rendering (pongo2 + html/template)
-│   ├── queue/         # Priority rebuild queue
-│   └── worker/        # Parallel worker pool
-└── examples/
-    ├── basic/         # Basic example with html/template
-    └── pongo/         # Full example with Django-like templates
-```
-
-## Example Project Structure
-
-```
-my-store/
+my-site/
 ├── main.go
 ├── templates/
 │   ├── layouts/
 │   │   └── base.html
 │   ├── components/
 │   │   ├── header.html
-│   │   ├── footer.html
 │   │   ├── product-card.html
 │   │   └── breadcrumb.html
 │   └── pages/
 │       ├── home.html
 │       ├── product.html
 │       └── category.html
-└── dist/              # Generated static files
+├── static/
+│   ├── js/
+│   │   └── router.js
+│   └── css/
+│       └── style.css
+└── dist/                  # generated HTML files
     ├── index.html
     ├── products/
     │   ├── 1.html
@@ -508,23 +443,64 @@ my-store/
         └── phones.html
 ```
 
-## Performance Tips
+## Example: Classifieds Site
 
-1. **Use appropriate worker count** — Start with `NumCPU * 2`, adjust based on I/O
-2. **Set priorities** — Critical pages (homepage, popular products) get higher priority
-3. **Batch events** — Use `/api/events/batch` for bulk updates
-4. **Monitor queue length** — If consistently high, add workers
-5. **Use Redis cluster** — For very high throughput scenarios
+```go
+// Generate ad page
+func generateAdPage(ctx context.Context, ad Ad) error {
+    data := map[string]any{
+        "ad":       ad,
+        "seller":   getSeller(ad.SellerID),
+        "category": getCategory(ad.CategoryID),
+    }
+    
+    subscriptions := []string{
+        "ad:" + ad.ID,
+        "seller:" + ad.SellerID,
+        "category:" + ad.CategoryID,
+    }
+    
+    return hs.GeneratePongoPage(ctx, hotstatic.Page{
+        Path:          "/ads/" + ad.ID + ".html",
+        Template:      "pages/ad.html",
+        Subscriptions: subscriptions,
+        Params:        map[string]string{"id": ad.ID},
+    }, data)
+}
+
+// Ad updated
+func onAdUpdated(ad Ad) {
+    data := map[string]any{
+        "ad":       ad,
+        "seller":   getSeller(ad.SellerID),
+        "category": getCategory(ad.CategoryID),
+    }
+    hs.EmitWithPayload("ad:"+ad.ID, "updated", data)
+}
+
+// Seller changed name → all their ads rebuild
+func onSellerUpdated(seller Seller) {
+    ads := getAdsBySeller(seller.ID)
+    for _, ad := range ads {
+        data := map[string]any{
+            "ad":       ad,
+            "seller":   seller,
+            "category": getCategory(ad.CategoryID),
+        }
+        hs.EmitWithPayload("ad:"+ad.ID, "updated", data)
+    }
+}
+```
 
 ## Running the Example
 
 ```bash
 cd examples/pongo
 
-# Make sure Redis is running
+# Start Redis
 redis-server
 
-# Run the example
+# Run example
 go run main.go
 
 # Open in browser
@@ -533,4 +509,4 @@ open http://localhost:8080
 
 ## License
 
-MIT License
+MIT
