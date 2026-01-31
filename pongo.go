@@ -86,10 +86,7 @@ func (phs *PongoHotStatic) RegisterPongoPage(name string, cfg PongoPageConfig) {
 // GeneratePongoPage generates a single page using pongo2 template.
 func (phs *PongoHotStatic) GeneratePongoPage(ctx context.Context, page Page, data map[string]any) error {
 	// Extract template name from page.Template (remove "pongo:" prefix if present)
-	templateName := page.Template
-	if strings.HasPrefix(templateName, "pongo:") {
-		templateName = strings.TrimPrefix(templateName, "pongo:")
-	}
+	templateName := strings.TrimPrefix(page.Template, "pongo:")
 
 	// Add common context
 	data["_path"] = page.Path
