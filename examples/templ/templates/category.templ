@@ -1,0 +1,62 @@
+package templates
+
+import "fmt"
+
+// CategoryData for category pages
+type CategoryData struct {
+	ID       string
+	Name     string
+	Products []ProductData
+}
+
+// CategoryPage renders a category listing page
+templ CategoryPage(category CategoryData) {
+	@Layout(category.Name + " - HotStatic Store") {
+		@Breadcrumb([]BreadcrumbItem{
+			{Label: "Home", URL: "/"},
+			{Label: category.Name, URL: ""},
+		})
+		<div class="category-page">
+			<div class="category-header">
+				<h1>{ category.Name }</h1>
+				<p class="count">{ fmt.Sprintf("%d products", len(category.Products)) }</p>
+			</div>
+			<div class="product-grid">
+				for _, product := range category.Products {
+					@ProductCard(product.ID, product.Name, product.Price, product.BrandName)
+				}
+			</div>
+			if len(category.Products) == 0 {
+				<div class="empty-state">
+					<p>No products found in this category.</p>
+				</div>
+			}
+		</div>
+		<style>
+			.category-header {
+				margin-bottom: 40px;
+			}
+			.category-header h1 {
+				font-size: 2.5rem;
+				color: #1a1a1a;
+				margin-bottom: 8px;
+			}
+			.category-header .count {
+				color: #666;
+				font-size: 1rem;
+			}
+			.product-grid {
+				display: grid;
+				grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+				gap: 30px;
+			}
+			.empty-state {
+				text-align: center;
+				padding: 60px 20px;
+				background: white;
+				border-radius: 12px;
+				color: #666;
+			}
+		</style>
+	}
+}

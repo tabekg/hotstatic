@@ -1,0 +1,56 @@
+{# Breadcrumb Component #}
+{# Usage: {% include "components/breadcrumb.html" with items=breadcrumb %} #}
+{# items = [{"label": "Home", "url": "/"}, {"label": "Phones", "url": ""}, ...] #}
+
+<nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+        {% for item in items %}
+        <li>
+            {% if item.url %}
+            <a href="{{ item.url }}">{{ item.label }}</a>
+            {% else %}
+            <span aria-current="page">{{ item.label }}</span>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ol>
+</nav>
+
+<style>
+    .breadcrumb {
+        margin-bottom: 24px;
+    }
+
+    .breadcrumb ol {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        list-style: none;
+        gap: 8px;
+    }
+
+    .breadcrumb li {
+        display: flex;
+        align-items: center;
+        font-size: 0.875rem;
+    }
+
+    .breadcrumb li:not(:last-child)::after {
+        content: "/";
+        margin-left: 8px;
+        color: var(--gray-light);
+    }
+
+    .breadcrumb a {
+        color: var(--gray);
+    }
+
+    .breadcrumb a:hover {
+        color: var(--primary);
+    }
+
+    .breadcrumb span {
+        color: var(--dark);
+        font-weight: 500;
+    }
+</style>

@@ -1,0 +1,310 @@
+package hotstatic
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/flosch/pongo2/v6"
+	"github.com/tabekg/hotstatic/pkg/builder"
+	"github.com/tabekg/hotstatic/pkg/registry"
+)
+
+// PongoPageConfig defines a page that uses pongo2 templates.
+type PongoPageConfig struct {
+	// Name identifies this page config
+	Name string
+
+	// PathPattern with placeholders (e.g., "/products/{id}.html")
+	PathPattern string
+
+	// Template file path relative to template dir
+	Template string
+
+	// DataLoader fetches data and returns subscriptions
+	// Returns: (template context map, subscription keys, error)
+	DataLoader func(ctx context.Context, params map[string]string) (map[string]any, []string, error)
+
+	// Priority for rebuild queue (default: 0)
+	Priority int
+
+	// Condition optional filter - return false to skip page
+	Condition func(params map[string]string) bool
+}
+
+// PongoHotStatic extends HotStatic with pongo2 support.
+type PongoHotStatic struct {
+	*HotStatic
+	pongoBuilder *builder.PongoBuilder
+	pongoConfigs map[string]*PongoPageConfig
+	mu           sync.RWMutex
+}
+
+// NewWithPongo creates HotStatic with pongo2 (Django/Jinja2) support.
+func NewWithPongo(cfg Config) (*PongoHotStatic, error) {
+	hs, err := New(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	pongoBuilder, err := builder.NewPongoBuilder(builder.PongoConfig{
+		TemplateDir: cfg.TemplateDir,
+		OutputDir:   cfg.OutputDir,
+	})
+	if err != nil {
+		hs.Stop()
+		return nil, fmt.Errorf("init pongo builder: %w", err)
+	}
+
+	phs := &PongoHotStatic{
+		HotStatic:    hs,
+		pongoBuilder: pongoBuilder,
+		pongoConfigs: make(map[string]*PongoPageConfig),
+	}
+
+	// Register default filters
+	phs.registerDefaultFilters()
+
+	return phs, nil
+}
+
+// RegisterPongoPage registers a pongo2-based page configuration.
+func (phs *PongoHotStatic) RegisterPongoPage(name string, cfg PongoPageConfig) {
+	phs.mu.Lock()
+	defer phs.mu.Unlock()
+
+	cfg.Name = name
+	phs.pongoConfigs[name] = &cfg
+}
+
+// GeneratePongoPages generates pages using pongo2 templates.
+func (phs *PongoHotStatic) GeneratePongoPages(ctx context.Context, configName string, ids []string) error {
+	phs.mu.RLock()
+	cfg, ok := phs.pongoConfigs[configName]
+	phs.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("pongo page config not found: %s", configName)
+	}
+
+	for _, id := range ids {
+		params := extractParams(cfg.PathPattern, id)
+
+		// Check condition
+		if cfg.Condition != nil && !cfg.Condition(params) {
+			continue
+		}
+
+		// Load data
+		data, subs, err := cfg.DataLoader(ctx, params)
+		if err != nil {
+			phs.logger.Error("data loader failed",
+				"config", configName,
+				"id", id,
+				"error", err.Error(),
+			)
+			continue
+		}
+
+		// Build path
+		path := buildPath(cfg.PathPattern, params)
+
+		// Add common context
+		data["_path"] = path
+		data["_params"] = params
+		data["_generated_at"] = time.Now()
+
+		// Render and write
+		result, err := phs.pongoBuilder.Build(ctx, cfg.Template, path, data)
+		if err != nil {
+			phs.logger.Error("pongo build failed",
+				"path", path,
+				"template", cfg.Template,
+				"error", err.Error(),
+			)
+			continue
+		}
+
+		// Subscribe page
+		err = phs.registry.Subscribe(ctx, registry.PageMeta{
+			Path:          path,
+			Template:      "pongo:" + cfg.Template,
+			Params:        params,
+			Subscriptions: subs,
+			LastBuilt:     time.Now(),
+			ContentHash:   result.ContentHash,
+		})
+		if err != nil {
+			return fmt.Errorf("subscribe %s: %w", path, err)
+		}
+	}
+
+	return nil
+}
+
+// BuildPongoPage rebuilds a single pongo2 page.
+func (phs *PongoHotStatic) BuildPongoPage(ctx context.Context, pagePath string) (*BuildResult, error) {
+	meta, err := phs.registry.GetPage(ctx, pagePath)
+	if err != nil {
+		return nil, err
+	}
+	if meta == nil {
+		return nil, fmt.Errorf("page not found: %s", pagePath)
+	}
+
+	// Check if it's a pongo page
+	if !strings.HasPrefix(meta.Template, "pongo:") {
+		return phs.Build(ctx, pagePath)
+	}
+
+	templateName := strings.TrimPrefix(meta.Template, "pongo:")
+
+	// Find config by template
+	phs.mu.RLock()
+	var cfg *PongoPageConfig
+	for _, c := range phs.pongoConfigs {
+		if c.Template == templateName {
+			cfg = c
+			break
+		}
+	}
+	phs.mu.RUnlock()
+
+	if cfg == nil {
+		return nil, fmt.Errorf("pongo config not found for template: %s", templateName)
+	}
+
+	start := time.Now()
+
+	// Load fresh data
+	data, subs, err := cfg.DataLoader(ctx, meta.Params)
+	if err != nil {
+		return &BuildResult{
+			Page:      Page{Path: meta.Path},
+			Success:   false,
+			Error:     err.Error(),
+			Duration:  time.Since(start),
+			Timestamp: time.Now(),
+		}, err
+	}
+
+	// Update subscriptions if changed
+	if !equalSlices(subs, meta.Subscriptions) {
+		meta.Subscriptions = subs
+		phs.registry.Subscribe(ctx, *meta)
+	}
+
+	// Add common context
+	data["_path"] = meta.Path
+	data["_params"] = meta.Params
+	data["_generated_at"] = time.Now()
+
+	// Render
+	result, err := phs.pongoBuilder.Build(ctx, templateName, meta.Path, data)
+	if err != nil {
+		return &BuildResult{
+			Page:      Page{Path: meta.Path},
+			Success:   false,
+			Error:     err.Error(),
+			Duration:  time.Since(start),
+			Timestamp: time.Now(),
+		}, err
+	}
+
+	// Update registry
+	phs.registry.UpdateLastBuilt(ctx, meta.Path, time.Now(), result.ContentHash)
+
+	return &BuildResult{
+		Page: Page{
+			Path:          meta.Path,
+			Template:      meta.Template,
+			Subscriptions: meta.Subscriptions,
+			Params:        meta.Params,
+			LastBuilt:     time.Now(),
+			ContentHash:   result.ContentHash,
+		},
+		Success:   true,
+		Duration:  time.Since(start),
+		Changed:   result.Changed,
+		Timestamp: time.Now(),
+	}, nil
+}
+
+// PongoBuilder returns the underlying pongo2 builder.
+func (phs *PongoHotStatic) PongoBuilder() *builder.PongoBuilder {
+	return phs.pongoBuilder
+}
+
+// AddFilter adds a custom template filter.
+// Usage: {{ value|myfilter }} or {{ value|myfilter:arg }}
+func (phs *PongoHotStatic) AddFilter(name string, fn pongo2.FilterFunction) error {
+	return phs.pongoBuilder.AddFilter(name, fn)
+}
+
+// AddGlobal adds a global variable available in all templates.
+func (phs *PongoHotStatic) AddGlobal(name string, value any) {
+	phs.pongoBuilder.AddGlobal(name, value)
+}
+
+// ReloadTemplates reloads all templates from disk.
+func (phs *PongoHotStatic) ReloadTemplates() error {
+	return phs.pongoBuilder.LoadTemplates()
+}
+
+func (phs *PongoHotStatic) registerDefaultFilters() {
+	// Format price: {{ 99.99|price }} → $99.99
+	pongo2.RegisterFilter("price", func(in *pongo2.Value, param *pongo2.Value) (*pongo2.Value, *pongo2.Error) {
+		format := "$%.2f"
+		if param.String() != "" {
+			format = param.String()
+		}
+		return pongo2.AsValue(fmt.Sprintf(format, in.Float())), nil
+	})
+
+	// Truncate text: {{ text|truncate:100 }}
+	pongo2.RegisterFilter("truncate", func(in *pongo2.Value, param *pongo2.Value) (*pongo2.Value, *pongo2.Error) {
+		s := in.String()
+		length := param.Integer()
+		if length <= 0 {
+			length = 100
+		}
+		if len(s) > length {
+			return pongo2.AsValue(s[:length] + "..."), nil
+		}
+		return in, nil
+	})
+
+	// Pluralize: {{ count|pluralize:"item,items" }}
+	pongo2.RegisterFilter("pluralize", func(in *pongo2.Value, param *pongo2.Value) (*pongo2.Value, *pongo2.Error) {
+		count := in.Integer()
+		forms := strings.Split(param.String(), ",")
+		if len(forms) < 2 {
+			forms = []string{"", "s"}
+		}
+		if count == 1 {
+			return pongo2.AsValue(forms[0]), nil
+		}
+		return pongo2.AsValue(forms[1]), nil
+	})
+
+	// Time ago: {{ date|timeago }}
+	pongo2.RegisterFilter("timeago", func(in *pongo2.Value, param *pongo2.Value) (*pongo2.Value, *pongo2.Error) {
+		t, ok := in.Interface().(time.Time)
+		if !ok {
+			return in, nil
+		}
+		diff := time.Since(t)
+		switch {
+		case diff < time.Minute:
+			return pongo2.AsValue("just now"), nil
+		case diff < time.Hour:
+			return pongo2.AsValue(fmt.Sprintf("%d minutes ago", int(diff.Minutes()))), nil
+		case diff < 24*time.Hour:
+			return pongo2.AsValue(fmt.Sprintf("%d hours ago", int(diff.Hours()))), nil
+		default:
+			return pongo2.AsValue(fmt.Sprintf("%d days ago", int(diff.Hours()/24))), nil
+		}
+	})
+}

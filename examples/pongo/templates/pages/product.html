@@ -1,0 +1,265 @@
+{% extends "layouts/base.html" %}
+
+{% block title %}{{ product.Name }} - HotStatic Store{% endblock %}
+
+{% block head %}
+<style>
+    .product-page {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 64px;
+        background: white;
+        border-radius: var(--radius);
+        padding: 48px;
+        box-shadow: var(--shadow);
+    }
+
+    .product-gallery {
+        position: sticky;
+        top: 100px;
+        align-self: start;
+    }
+
+    .product-main-image {
+        aspect-ratio: 1;
+        background: linear-gradient(135deg, #f0f4ff 0%, #e0e7ff 100%);
+        border-radius: var(--radius);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin-bottom: 16px;
+    }
+
+    .product-main-image span {
+        font-size: 8rem;
+        font-weight: bold;
+        color: var(--primary);
+        opacity: 0.3;
+    }
+
+    .product-thumbs {
+        display: flex;
+        gap: 12px;
+    }
+
+    .product-thumb {
+        width: 80px;
+        height: 80px;
+        background: linear-gradient(135deg, #f0f4ff 0%, #e0e7ff 100%);
+        border-radius: 8px;
+        border: 2px solid transparent;
+        cursor: pointer;
+        transition: border-color 0.2s;
+    }
+
+    .product-thumb:hover, .product-thumb.active {
+        border-color: var(--primary);
+    }
+
+    .product-info {
+        display: flex;
+        flex-direction: column;
+    }
+
+    .product-brand {
+        font-size: 0.875rem;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        color: var(--primary);
+        font-weight: 600;
+        margin-bottom: 8px;
+    }
+
+    .product-title {
+        font-size: 2.5rem;
+        font-weight: 700;
+        line-height: 1.2;
+        margin-bottom: 16px;
+    }
+
+    .product-rating {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 24px;
+    }
+
+    .stars {
+        color: #fbbf24;
+        font-size: 1.125rem;
+    }
+
+    .reviews-count {
+        color: var(--gray);
+        font-size: 0.875rem;
+    }
+
+    .product-price-box {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        margin-bottom: 24px;
+    }
+
+    .product-price {
+        font-size: 2.5rem;
+        font-weight: 800;
+        color: var(--dark);
+    }
+
+    .product-stock {
+        margin-bottom: 32px;
+    }
+
+    .product-description {
+        color: var(--gray);
+        line-height: 1.8;
+        margin-bottom: 32px;
+    }
+
+    .product-features {
+        margin-bottom: 32px;
+    }
+
+    .product-features h3 {
+        font-size: 1rem;
+        font-weight: 600;
+        margin-bottom: 16px;
+        color: var(--dark);
+    }
+
+    .product-features ul {
+        list-style: none;
+    }
+
+    .product-features li {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 0;
+        border-bottom: 1px solid var(--gray-light);
+    }
+
+    .product-features li::before {
+        content: "✓";
+        width: 24px;
+        height: 24px;
+        background: var(--success);
+        color: white;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.75rem;
+        font-weight: bold;
+    }
+
+    .product-actions {
+        display: flex;
+        gap: 16px;
+        margin-top: auto;
+    }
+
+    .product-actions .btn {
+        flex: 1;
+        padding: 16px 24px;
+    }
+
+    .meta-info {
+        margin-top: 32px;
+        padding-top: 24px;
+        border-top: 1px solid var(--gray-light);
+        font-size: 0.875rem;
+        color: var(--gray);
+    }
+
+    .meta-info span {
+        display: block;
+        margin-bottom: 8px;
+    }
+
+    @media (max-width: 1024px) {
+        .product-page {
+            grid-template-columns: 1fr;
+            gap: 32px;
+            padding: 24px;
+        }
+        .product-gallery {
+            position: static;
+        }
+        .product-title {
+            font-size: 1.75rem;
+        }
+        .product-price {
+            font-size: 2rem;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+{% include "components/breadcrumb.html" with items=breadcrumb %}
+
+<div class="product-page">
+    <div class="product-gallery">
+        <div class="product-main-image">
+            <span>{{ product.Name|first }}</span>
+        </div>
+        <div class="product-thumbs">
+            <div class="product-thumb active"></div>
+            <div class="product-thumb"></div>
+            <div class="product-thumb"></div>
+            <div class="product-thumb"></div>
+        </div>
+    </div>
+
+    <div class="product-info">
+        <span class="product-brand">{{ product.BrandName }}</span>
+        <h1 class="product-title">{{ product.Name }}</h1>
+
+        <div class="product-rating">
+            <span class="stars">★★★★★</span>
+            <span class="reviews-count">128 reviews</span>
+        </div>
+
+        <div class="product-price-box">
+            <span class="product-price">{{ product.Price|price }}</span>
+            <div class="product-stock">
+                {% if product.InStock %}
+                <span class="badge badge-success">✓ In Stock</span>
+                {% else %}
+                <span class="badge badge-danger">Out of Stock</span>
+                {% endif %}
+            </div>
+        </div>
+
+        <p class="product-description">{{ product.Description }}</p>
+
+        {% if product.Features %}
+        <div class="product-features">
+            <h3>Key Features</h3>
+            <ul>
+                {% for feature in product.Features %}
+                <li>{{ feature }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        <div class="product-actions">
+            {% if product.InStock %}
+            <button class="btn btn-primary">Add to Cart</button>
+            {% else %}
+            <button class="btn btn-secondary" disabled>Out of Stock</button>
+            {% endif %}
+            <button class="btn btn-secondary">♥ Wishlist</button>
+        </div>
+
+        <div class="meta-info">
+            <span>SKU: {{ product.ID }}</span>
+            <span>Category: <a href="/categories/{{ product.CategoryID }}.html">{{ product.CategoryName }}</a></span>
+            <span>Brand: {{ product.BrandName }}</span>
+        </div>
+    </div>
+</div>
+{% endblock %}

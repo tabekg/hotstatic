@@ -1,0 +1,221 @@
+{% extends "layouts/base.html" %}
+
+{% block title %}HotStatic Store - Home{% endblock %}
+
+{% block head %}
+<style>
+    .hero {
+        text-align: center;
+        padding: 80px 40px;
+        background: linear-gradient(135deg, #f0f4ff 0%, #fdf2f8 100%);
+        border-radius: var(--radius);
+        margin-bottom: 64px;
+    }
+
+    .hero h1 {
+        font-size: 3.5rem;
+        font-weight: 800;
+        background: linear-gradient(135deg, var(--primary), var(--secondary));
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        margin-bottom: 16px;
+    }
+
+    .hero p {
+        font-size: 1.25rem;
+        color: var(--gray);
+        max-width: 600px;
+        margin: 0 auto 32px;
+    }
+
+    .hero-buttons {
+        display: flex;
+        gap: 16px;
+        justify-content: center;
+    }
+
+    .section {
+        margin-bottom: 64px;
+    }
+
+    .section-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 32px;
+    }
+
+    .section-header h2 {
+        font-size: 1.75rem;
+        font-weight: 700;
+    }
+
+    .section-header a {
+        font-weight: 500;
+    }
+
+    .categories-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 24px;
+    }
+
+    .category-card {
+        display: flex;
+        align-items: center;
+        gap: 20px;
+        padding: 24px;
+        background: white;
+        border-radius: var(--radius);
+        box-shadow: var(--shadow);
+        transition: all 0.3s ease;
+    }
+
+    .category-card:hover {
+        transform: translateY(-4px);
+        box-shadow: var(--shadow-lg);
+    }
+
+    .category-icon {
+        width: 64px;
+        height: 64px;
+        background: linear-gradient(135deg, var(--primary), var(--secondary));
+        border-radius: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.5rem;
+        color: white;
+    }
+
+    .category-info h3 {
+        font-size: 1.125rem;
+        font-weight: 600;
+        margin-bottom: 4px;
+        color: var(--dark);
+    }
+
+    .category-info span {
+        font-size: 0.875rem;
+        color: var(--gray);
+    }
+
+    .products-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+        gap: 24px;
+    }
+
+    .features {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 32px;
+        padding: 48px;
+        background: white;
+        border-radius: var(--radius);
+    }
+
+    .feature {
+        text-align: center;
+    }
+
+    .feature-icon {
+        width: 56px;
+        height: 56px;
+        background: linear-gradient(135deg, #f0f4ff 0%, #e0e7ff 100%);
+        border-radius: 14px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 0 auto 16px;
+        font-size: 1.5rem;
+    }
+
+    .feature h3 {
+        font-size: 1.125rem;
+        margin-bottom: 8px;
+    }
+
+    .feature p {
+        font-size: 0.875rem;
+        color: var(--gray);
+    }
+
+    @media (max-width: 768px) {
+        .hero h1 {
+            font-size: 2.5rem;
+        }
+        .hero-buttons {
+            flex-direction: column;
+        }
+        .features {
+            grid-template-columns: 1fr;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<section class="hero">
+    <h1>Welcome to HotStatic</h1>
+    <p>Lightning-fast static e-commerce powered by reactive rebuilds. When data changes, pages rebuild automatically.</p>
+    <div class="hero-buttons">
+        <a href="/categories/phones.html" class="btn btn-primary">Shop Phones</a>
+        <a href="/categories/laptops.html" class="btn btn-secondary">Shop Laptops</a>
+    </div>
+</section>
+
+<section class="section">
+    <div class="section-header">
+        <h2>Shop by Category</h2>
+    </div>
+    <div class="categories-grid">
+        {% for category in categories %}
+        <a href="/categories/{{ category.ID }}.html" class="category-card">
+            <div class="category-icon">
+                {% if category.ID == "phones" %}📱{% elif category.ID == "laptops" %}💻{% else %}📦{% endif %}
+            </div>
+            <div class="category-info">
+                <h3>{{ category.Name }}</h3>
+                <span>{{ category.Count }} product{{ category.Count|pluralize:"," }}{% if category.Count != 1 %}s{% endif %}</span>
+            </div>
+        </a>
+        {% endfor %}
+    </div>
+</section>
+
+{% if featured_products %}
+<section class="section">
+    <div class="section-header">
+        <h2>Featured Products</h2>
+        <a href="#">View all →</a>
+    </div>
+    <div class="products-grid">
+        {% for product in featured_products %}
+        {% include "components/product-card.html" with product=product %}
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
+
+<section class="section">
+    <div class="features">
+        <div class="feature">
+            <div class="feature-icon">⚡</div>
+            <h3>Lightning Fast</h3>
+            <p>Static pages load instantly. No server rendering, just pure HTML.</p>
+        </div>
+        <div class="feature">
+            <div class="feature-icon">🔄</div>
+            <h3>Reactive Rebuilds</h3>
+            <p>When data changes, only affected pages rebuild automatically.</p>
+        </div>
+        <div class="feature">
+            <div class="feature-icon">📈</div>
+            <h3>Scalable</h3>
+            <p>Handle millions of pages with parallel workers and Redis.</p>
+        </div>
+    </div>
+</section>
+{% endblock %}

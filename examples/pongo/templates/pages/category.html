@@ -1,0 +1,164 @@
+{% extends "layouts/base.html" %}
+
+{% block title %}{{ category.Name }} - HotStatic Store{% endblock %}
+
+{% block head %}
+<style>
+    .category-header {
+        margin-bottom: 48px;
+    }
+
+    .category-title {
+        font-size: 2.5rem;
+        font-weight: 800;
+        margin-bottom: 8px;
+    }
+
+    .category-meta {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        color: var(--gray);
+    }
+
+    .category-count {
+        font-size: 1rem;
+    }
+
+    .category-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 32px;
+        padding: 16px 24px;
+        background: white;
+        border-radius: var(--radius);
+        box-shadow: var(--shadow);
+    }
+
+    .toolbar-filters {
+        display: flex;
+        gap: 12px;
+    }
+
+    .filter-btn {
+        padding: 8px 16px;
+        border-radius: 8px;
+        background: transparent;
+        border: 1px solid var(--gray-light);
+        font-size: 0.875rem;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+
+    .filter-btn:hover, .filter-btn.active {
+        background: var(--primary);
+        border-color: var(--primary);
+        color: white;
+    }
+
+    .toolbar-sort {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .toolbar-sort label {
+        font-size: 0.875rem;
+        color: var(--gray);
+    }
+
+    .toolbar-sort select {
+        padding: 8px 12px;
+        border-radius: 8px;
+        border: 1px solid var(--gray-light);
+        font-size: 0.875rem;
+        cursor: pointer;
+    }
+
+    .products-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+        gap: 24px;
+    }
+
+    .empty-state {
+        text-align: center;
+        padding: 80px 40px;
+        background: white;
+        border-radius: var(--radius);
+    }
+
+    .empty-state-icon {
+        font-size: 4rem;
+        margin-bottom: 16px;
+    }
+
+    .empty-state h3 {
+        font-size: 1.5rem;
+        margin-bottom: 8px;
+    }
+
+    .empty-state p {
+        color: var(--gray);
+        margin-bottom: 24px;
+    }
+
+    @media (max-width: 768px) {
+        .category-title {
+            font-size: 1.75rem;
+        }
+        .category-toolbar {
+            flex-direction: column;
+            gap: 16px;
+            align-items: stretch;
+        }
+        .toolbar-filters {
+            flex-wrap: wrap;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+{% include "components/breadcrumb.html" with items=breadcrumb %}
+
+<div class="category-header">
+    <h1 class="category-title">{{ category.Name }}</h1>
+    <div class="category-meta">
+        <span class="category-count">{{ products|length }} product{% if products|length != 1 %}s{% endif %}</span>
+    </div>
+</div>
+
+<div class="category-toolbar">
+    <div class="toolbar-filters">
+        <button class="filter-btn active">All</button>
+        <button class="filter-btn">In Stock</button>
+        <button class="filter-btn">On Sale</button>
+    </div>
+    <div class="toolbar-sort">
+        <label for="sort">Sort by:</label>
+        <select id="sort">
+            <option>Featured</option>
+            <option>Price: Low to High</option>
+            <option>Price: High to Low</option>
+            <option>Newest</option>
+        </select>
+    </div>
+</div>
+
+{% if products %}
+<div class="products-grid">
+    {% for product in products %}
+    {% include "components/product-card.html" with product=product %}
+    {% endfor %}
+</div>
+{% else %}
+<div class="empty-state">
+    <div class="empty-state-icon">📦</div>
+    <h3>No products found</h3>
+    <p>There are no products in this category yet.</p>
+    <a href="/" class="btn btn-primary">Back to Home</a>
+</div>
+{% endif %}
+{% endblock %}

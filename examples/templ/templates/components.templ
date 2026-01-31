@@ -1,0 +1,142 @@
+package templates
+
+import "fmt"
+
+// ProductCard displays a product in a card format
+templ ProductCard(id, name string, price float64, brandName string) {
+	<div class="product-card">
+		<div class="product-image">
+			<div class="placeholder">{ string(name[0]) }</div>
+		</div>
+		<div class="product-info">
+			<span class="brand">{ brandName }</span>
+			<h3>{ name }</h3>
+			<p class="price">{ fmt.Sprintf("$%.2f", price) }</p>
+			<a href={ templ.SafeURL("/products/" + id + ".html") } class="btn">View Details</a>
+		</div>
+		<style>
+			.product-card {
+				background: white;
+				border-radius: 12px;
+				overflow: hidden;
+				box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+				transition: transform 0.2s, box-shadow 0.2s;
+			}
+			.product-card:hover {
+				transform: translateY(-4px);
+				box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+			}
+			.product-image {
+				height: 200px;
+				background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+				display: flex;
+				align-items: center;
+				justify-content: center;
+			}
+			.product-image .placeholder {
+				font-size: 4rem;
+				color: #667eea;
+				font-weight: bold;
+			}
+			.product-info {
+				padding: 20px;
+			}
+			.product-info .brand {
+				font-size: 0.75rem;
+				color: #667eea;
+				text-transform: uppercase;
+				letter-spacing: 1px;
+			}
+			.product-info h3 {
+				margin: 8px 0;
+				font-size: 1.125rem;
+			}
+			.product-info .price {
+				font-size: 1.25rem;
+				font-weight: 600;
+				color: #333;
+				margin-bottom: 15px;
+			}
+			.btn {
+				display: inline-block;
+				background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+				color: white;
+				padding: 10px 20px;
+				border-radius: 6px;
+				text-decoration: none;
+				font-size: 0.875rem;
+				transition: opacity 0.2s;
+			}
+			.btn:hover {
+				opacity: 0.9;
+			}
+		</style>
+	</div>
+}
+
+// Badge displays a small badge/tag
+templ Badge(text, color string) {
+	<span class={ "badge badge-" + color }>{ text }</span>
+	<style>
+		.badge {
+			display: inline-block;
+			padding: 4px 12px;
+			border-radius: 20px;
+			font-size: 0.75rem;
+			font-weight: 500;
+		}
+		.badge-blue {
+			background: #e3f2fd;
+			color: #1976d2;
+		}
+		.badge-green {
+			background: #e8f5e9;
+			color: #388e3c;
+		}
+		.badge-purple {
+			background: #f3e5f5;
+			color: #7b1fa2;
+		}
+	</style>
+}
+
+// Breadcrumb navigation
+templ Breadcrumb(items []BreadcrumbItem) {
+	<nav class="breadcrumb">
+		for i, item := range items {
+			if i > 0 {
+				<span class="separator">/</span>
+			}
+			if item.URL != "" {
+				<a href={ templ.SafeURL(item.URL) }>{ item.Label }</a>
+			} else {
+				<span class="current">{ item.Label }</span>
+			}
+		}
+	</nav>
+	<style>
+		.breadcrumb {
+			margin-bottom: 20px;
+			font-size: 0.875rem;
+		}
+		.breadcrumb a {
+			color: #667eea;
+			text-decoration: none;
+		}
+		.breadcrumb a:hover {
+			text-decoration: underline;
+		}
+		.breadcrumb .separator {
+			margin: 0 8px;
+			color: #999;
+		}
+		.breadcrumb .current {
+			color: #666;
+		}
+	</style>
+}
+
+type BreadcrumbItem struct {
+	Label string
+	URL   string
+}
