@@ -24,15 +24,8 @@ type PongoPageConfig struct {
 	// Template file path relative to template dir
 	Template string
 
-	// DataLoader fetches data and returns subscriptions
-	// Returns: (template context map, subscription keys, error)
-	DataLoader func(ctx context.Context, params map[string]string) (map[string]any, []string, error)
-
 	// Priority for rebuild queue (default: 0)
 	Priority int
-
-	// Condition optional filter - return false to skip page
-	Condition func(params map[string]string) bool
 }
 
 // PongoHotStatic extends HotStatic with pongo2 support.
@@ -90,78 +83,43 @@ func (phs *PongoHotStatic) RegisterPongoPage(name string, cfg PongoPageConfig) {
 	phs.pongoConfigs[name] = &cfg
 }
 
-// GeneratePongoPages generates pages using pongo2 templates.
-func (phs *PongoHotStatic) GeneratePongoPages(ctx context.Context, configName string, ids []string) error {
-	phs.mu.RLock()
-	cfg, ok := phs.pongoConfigs[configName]
-	phs.mu.RUnlock()
-
-	if !ok {
-		return fmt.Errorf("pongo page config not found: %s", configName)
+// GeneratePongoPage generates a single page using pongo2 template.
+func (phs *PongoHotStatic) GeneratePongoPage(ctx context.Context, page Page, data map[string]any) error {
+	// Extract template name from page.Template (remove "pongo:" prefix if present)
+	templateName := page.Template
+	if strings.HasPrefix(templateName, "pongo:") {
+		templateName = strings.TrimPrefix(templateName, "pongo:")
 	}
 
-	for _, id := range ids {
-		params := extractParams(cfg.PathPattern, id)
+	// Add common context
+	data["_path"] = page.Path
+	data["_params"] = page.Params
+	data["_generated_at"] = time.Now()
 
-		// Check condition
-		if cfg.Condition != nil && !cfg.Condition(params) {
-			continue
-		}
+	// Render and write
+	result, err := phs.pongoBuilder.Build(ctx, templateName, page.Path, data)
+	if err != nil {
+		return fmt.Errorf("pongo build %s: %w", page.Path, err)
+	}
 
-		// Load data
-		data, subs, err := cfg.DataLoader(ctx, params)
-		if err != nil {
-			phs.logger.Error("data loader failed",
-				"config", configName,
-				"id", id,
-				"error", err.Error(),
-			)
-			continue
-		}
-
-		// Build path
-		path := buildPath(cfg.PathPattern, params)
-
-		// Add common context
-		data["_path"] = path
-		data["_params"] = params
-		data["_generated_at"] = time.Now()
-
-		// Render and write
-		result, err := phs.pongoBuilder.Build(ctx, cfg.Template, path, data)
-		if err != nil {
-			phs.logger.Error("pongo build failed",
-				"path", path,
-				"template", cfg.Template,
-				"error", err.Error(),
-			)
-			continue
-		}
-
-		// Subscribe page
-		err = phs.registry.Subscribe(ctx, registry.PageMeta{
-			Path:          path,
-			Template:      "pongo:" + cfg.Template,
-			Params:        params,
-			Subscriptions: subs,
-			LastBuilt:     time.Now(),
-			ContentHash:   result.ContentHash,
-		})
-		if err != nil {
-			return fmt.Errorf("subscribe %s: %w", path, err)
-		}
+	// Subscribe page
+	err = phs.registry.Subscribe(ctx, registry.PageMeta{
+		Path:          page.Path,
+		Template:      "pongo:" + templateName,
+		Params:        page.Params,
+		Subscriptions: page.Subscriptions,
+		LastBuilt:     time.Now(),
+		ContentHash:   result.ContentHash,
+	})
+	if err != nil {
+		return fmt.Errorf("subscribe %s: %w", page.Path, err)
 	}
 
 	return nil
 }
 
-// BuildPongoPage rebuilds a single pongo2 page.
-func (phs *PongoHotStatic) BuildPongoPage(ctx context.Context, pagePath string) (*BuildResult, error) {
-	return phs.BuildPongoPageWithPayload(ctx, pagePath, nil)
-}
-
-// BuildPongoPageWithPayload rebuilds a page using provided payload or DataLoader.
-func (phs *PongoHotStatic) BuildPongoPageWithPayload(ctx context.Context, pagePath string, payload map[string]any) (*BuildResult, error) {
+// BuildPongoPage rebuilds a single pongo2 page with the given payload.
+func (phs *PongoHotStatic) BuildPongoPage(ctx context.Context, pagePath string, payload map[string]any) (*BuildResult, error) {
 	meta, err := phs.registry.GetPage(ctx, pagePath)
 	if err != nil {
 		return nil, err
@@ -172,66 +130,19 @@ func (phs *PongoHotStatic) BuildPongoPageWithPayload(ctx context.Context, pagePa
 
 	// Check if it's a pongo page
 	if !strings.HasPrefix(meta.Template, "pongo:") {
-		return phs.Build(ctx, pagePath)
+		return phs.Build(ctx, pagePath, payload)
 	}
 
 	templateName := strings.TrimPrefix(meta.Template, "pongo:")
-
-	// Find config by template
-	phs.mu.RLock()
-	var cfg *PongoPageConfig
-	for _, c := range phs.pongoConfigs {
-		if c.Template == templateName {
-			cfg = c
-			break
-		}
-	}
-	phs.mu.RUnlock()
-
-	if cfg == nil {
-		return nil, fmt.Errorf("pongo config not found for template: %s", templateName)
-	}
-
 	start := time.Now()
 
-	var data map[string]any
-	var subs []string
-
-	// Use payload if provided, otherwise call DataLoader
-	if len(payload) > 0 {
-		data = payload
-		subs = meta.Subscriptions
-		phs.logger.Debug("using payload data",
-			"path", meta.Path,
-			"payload_keys", len(payload),
-		)
-	} else {
-		// Load fresh data from DataLoader
-		data, subs, err = cfg.DataLoader(ctx, meta.Params)
-		if err != nil {
-			return &BuildResult{
-				Page:      Page{Path: meta.Path},
-				Success:   false,
-				Error:     err.Error(),
-				Duration:  time.Since(start),
-				Timestamp: time.Now(),
-			}, err
-		}
-	}
-
-	// Update subscriptions if changed
-	if !equalSlices(subs, meta.Subscriptions) {
-		meta.Subscriptions = subs
-		phs.registry.Subscribe(ctx, *meta)
-	}
-
 	// Add common context
-	data["_path"] = meta.Path
-	data["_params"] = meta.Params
-	data["_generated_at"] = time.Now()
+	payload["_path"] = meta.Path
+	payload["_params"] = meta.Params
+	payload["_generated_at"] = time.Now()
 
 	// Render
-	result, err := phs.pongoBuilder.Build(ctx, templateName, meta.Path, data)
+	result, err := phs.pongoBuilder.Build(ctx, templateName, meta.Path, payload)
 	if err != nil {
 		return &BuildResult{
 			Page:      Page{Path: meta.Path},
@@ -284,6 +195,13 @@ func (phs *PongoHotStatic) ReloadTemplates() error {
 
 // pongoBuildHandler handles page rebuild jobs for both pongo and standard pages.
 func (phs *PongoHotStatic) pongoBuildHandler(ctx context.Context, job worker.Job) error {
+	if len(job.Payload) == 0 {
+		phs.logger.Warn("skipping rebuild - no payload provided",
+			"path", job.Path,
+		)
+		return nil
+	}
+
 	meta, err := phs.registry.GetPage(ctx, job.Path)
 	if err != nil {
 		return err
@@ -294,7 +212,7 @@ func (phs *PongoHotStatic) pongoBuildHandler(ctx context.Context, job worker.Job
 
 	// Check if it's a pongo page
 	if strings.HasPrefix(meta.Template, "pongo:") {
-		_, err = phs.BuildPongoPageWithPayload(ctx, job.Path, job.Payload)
+		_, err = phs.BuildPongoPage(ctx, job.Path, job.Payload)
 		return err
 	}
 

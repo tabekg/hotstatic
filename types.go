@@ -1,7 +1,6 @@
 package hotstatic
 
 import (
-	"context"
 	"time"
 )
 
@@ -22,9 +21,8 @@ type Event struct {
 	// Priority for rebuild queue (higher = more urgent)
 	Priority int `json:"priority"`
 
-	// Payload contains the entity data (optional).
-	// If provided, DataLoader will not be called and this data will be used directly.
-	// This avoids extra database queries when you already have the data.
+	// Payload contains the entity data for template rendering.
+	// This data is passed directly to the template.
 	Payload map[string]any `json:"payload,omitempty"`
 
 	// Metadata for additional context (not passed to template)
@@ -73,15 +71,8 @@ type PageConfig struct {
 	// Template file or name
 	Template string
 
-	// DataLoader fetches data and returns subscriptions
-	// Returns: (data for template, subscription keys, error)
-	DataLoader func(ctx context.Context, params map[string]string) (any, []string, error)
-
 	// Priority for rebuild queue (default: 0)
 	Priority int
-
-	// Condition optional filter - return false to skip page
-	Condition func(params map[string]string) bool
 }
 
 // BuildResult represents the outcome of building a page.
@@ -109,34 +100,4 @@ type Stats struct {
 type Subscription struct {
 	Key      string `json:"key"`       // e.g., "product:123"
 	PagePath string `json:"page_path"` // e.g., "/products/123.html"
-}
-
-// DataSource defines where to fetch entity data.
-type DataSource interface {
-	// Fetch retrieves data for the given entity type and ID
-	Fetch(ctx context.Context, entityType, entityID string) (any, error)
-
-	// List returns all IDs for an entity type (for full rebuild)
-	List(ctx context.Context, entityType string) ([]string, error)
-}
-
-// TemplateEngine renders pages from data.
-type TemplateEngine interface {
-	// Render produces HTML from template and data
-	Render(ctx context.Context, template string, data any) ([]byte, error)
-
-	// Load loads or reloads templates from disk
-	Load(templateDir string) error
-}
-
-// Storage handles page output.
-type Storage interface {
-	// Write saves rendered content
-	Write(ctx context.Context, path string, content []byte) error
-
-	// Delete removes a page
-	Delete(ctx context.Context, path string) error
-
-	// Exists checks if page exists
-	Exists(ctx context.Context, path string) (bool, error)
 }

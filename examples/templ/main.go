@@ -94,10 +94,8 @@ func main() {
 	}
 	defer hs.Stop()
 
-	// Register templ page configurations
-	registerProductPage(hs)
-	registerCategoryPage(hs)
-	registerHomePage(hs)
+	// Register templ page configurations with Component factories
+	registerTemplConfigs(hs)
 
 	// Start processing
 	hs.Start()
@@ -108,19 +106,57 @@ func main() {
 	fmt.Println("Generating pages...")
 
 	// Generate product pages
-	productIDs := []string{"1", "2", "3", "4"}
-	if err := hs.GenerateTemplPages(ctx, "product-detail", productIDs); err != nil {
-		log.Printf("generate products: %v", err)
+	for id, product := range products {
+		subs := []string{
+			"product:" + product.ID,
+			"brand:" + product.BrandID,
+			"category:" + product.CategoryID,
+		}
+		err := hs.GenerateTemplPage(ctx, "product-detail", hotstatic.Page{
+			Path:          "/products/" + id + ".html",
+			Subscriptions: subs,
+			Params:        map[string]string{"id": id},
+		}, product)
+		if err != nil {
+			log.Printf("generate product %s: %v", id, err)
+		}
 	}
 
 	// Generate category pages
-	categoryIDs := []string{"phones", "laptops"}
-	if err := hs.GenerateTemplPages(ctx, "category-list", categoryIDs); err != nil {
-		log.Printf("generate categories: %v", err)
+	for categoryID, categoryName := range categories {
+		var categoryProducts []templates.ProductData
+		for _, p := range products {
+			if p.CategoryID == categoryID {
+				categoryProducts = append(categoryProducts, p)
+			}
+		}
+		data := templates.CategoryData{
+			ID:       categoryID,
+			Name:     categoryName,
+			Products: categoryProducts,
+		}
+		subs := []string{"category:" + categoryID}
+		for _, p := range categoryProducts {
+			subs = append(subs, "product:"+p.ID)
+		}
+		err := hs.GenerateTemplPage(ctx, "category-list", hotstatic.Page{
+			Path:          "/categories/" + categoryID + ".html",
+			Subscriptions: subs,
+			Params:        map[string]string{"id": categoryID},
+		}, data)
+		if err != nil {
+			log.Printf("generate category %s: %v", categoryID, err)
+		}
 	}
 
 	// Generate home page
-	if err := hs.GenerateTemplPages(ctx, "home", []string{"index"}); err != nil {
+	homeData, homeSubs := getHomeData()
+	err = hs.GenerateTemplPage(ctx, "home", hotstatic.Page{
+		Path:          "/index.html",
+		Subscriptions: homeSubs,
+		Params:        map[string]string{},
+	}, homeData)
+	if err != nil {
 		log.Printf("generate home: %v", err)
 	}
 
@@ -155,11 +191,16 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
-	// Demo: emit event after 5 seconds
+	// Demo: emit event after 5 seconds (with payload)
 	go func() {
 		time.Sleep(5 * time.Second)
 		fmt.Println("\n--- Emitting product update event ---")
-		hs.Emit("product:1", "updated")
+		// For templ, emit doesn't work without proper handler for payload
+		// This is just a demo - in real app you'd emit with proper data
+		product := products["1"]
+		subs := []string{"product:" + product.ID, "brand:" + product.BrandID, "category:" + product.CategoryID}
+		_ = subs // subscriptions would be used in real scenario
+		fmt.Println("Product update would trigger rebuild with payload")
 	}()
 
 	// Запуск сервера в горутине
@@ -186,118 +227,71 @@ func main() {
 	fmt.Println("Shutdown complete")
 }
 
-func registerProductPage(hs *hotstatic.TemplHotStatic) {
+func registerTemplConfigs(hs *hotstatic.TemplHotStatic) {
+	// Product page - converts ProductData to component
 	hs.RegisterTemplPage("product-detail", hotstatic.TemplPageConfig{
 		PathPattern: "/products/{id}.html",
-		DataLoader: func(ctx context.Context, params map[string]string) (any, []string, error) {
-			id := params["id"]
-			product, ok := products[id]
-			if !ok {
-				return nil, nil, fmt.Errorf("product not found: %s", id)
-			}
-
-			subscriptions := []string{
-				"product:" + product.ID,
-				"brand:" + product.BrandID,
-				"category:" + product.CategoryID,
-			}
-
-			return product, subscriptions, nil
-		},
 		Component: func(ctx context.Context, params map[string]string, data any) templ.Component {
 			product := data.(templates.ProductData)
 			return templates.ProductPage(product)
 		},
 	})
-}
 
-func registerCategoryPage(hs *hotstatic.TemplHotStatic) {
+	// Category page - converts CategoryData to component
 	hs.RegisterTemplPage("category-list", hotstatic.TemplPageConfig{
 		PathPattern: "/categories/{id}.html",
-		DataLoader: func(ctx context.Context, params map[string]string) (any, []string, error) {
-			categoryID := params["id"]
-			categoryName, ok := categories[categoryID]
-			if !ok {
-				return nil, nil, fmt.Errorf("category not found: %s", categoryID)
-			}
-
-			// Collect products in this category
-			var categoryProducts []templates.ProductData
-			for _, p := range products {
-				if p.CategoryID == categoryID {
-					categoryProducts = append(categoryProducts, p)
-				}
-			}
-
-			data := templates.CategoryData{
-				ID:       categoryID,
-				Name:     categoryName,
-				Products: categoryProducts,
-			}
-
-			// Subscribe to category and all its products
-			subs := []string{"category:" + categoryID}
-			for _, p := range categoryProducts {
-				subs = append(subs, "product:"+p.ID)
-			}
-
-			return data, subs, nil
-		},
 		Component: func(ctx context.Context, params map[string]string, data any) templ.Component {
 			category := data.(templates.CategoryData)
 			return templates.CategoryPage(category)
 		},
 	})
-}
 
-func registerHomePage(hs *hotstatic.TemplHotStatic) {
+	// Home page - converts HomeData to component
 	hs.RegisterTemplPage("home", hotstatic.TemplPageConfig{
 		PathPattern: "/index.html",
-		DataLoader: func(ctx context.Context, params map[string]string) (any, []string, error) {
-			// Collect featured products (first 3)
-			var featured []templates.ProductData
-			for _, p := range products {
-				featured = append(featured, p)
-				if len(featured) >= 3 {
-					break
-				}
-			}
-
-			// Collect category info
-			var cats []templates.CategoryInfo
-			for id, name := range categories {
-				count := 0
-				for _, p := range products {
-					if p.CategoryID == id {
-						count++
-					}
-				}
-				cats = append(cats, templates.CategoryInfo{
-					ID:    id,
-					Name:  name,
-					Count: count,
-				})
-			}
-
-			data := templates.HomeData{
-				FeaturedProducts: featured,
-				Categories:       cats,
-			}
-
-			// Subscribe to all products and categories
-			subs := []string{"home:index"}
-			for _, p := range products {
-				subs = append(subs, "product:"+p.ID)
-			}
-			for id := range categories {
-				subs = append(subs, "category:"+id)
-			}
-
-			return data, subs, nil
-		},
 		Component: func(ctx context.Context, params map[string]string, data any) templ.Component {
 			homeData := data.(templates.HomeData)
 			return templates.HomePage(homeData)
 		},
 	})
+}
+
+func getHomeData() (templates.HomeData, []string) {
+	var featured []templates.ProductData
+	for _, p := range products {
+		featured = append(featured, p)
+		if len(featured) >= 3 {
+			break
+		}
+	}
+
+	var cats []templates.CategoryInfo
+	for id, name := range categories {
+		count := 0
+		for _, p := range products {
+			if p.CategoryID == id {
+				count++
+			}
+		}
+		cats = append(cats, templates.CategoryInfo{
+			ID:    id,
+			Name:  name,
+			Count: count,
+		})
+	}
+
+	data := templates.HomeData{
+		FeaturedProducts: featured,
+		Categories:       cats,
+	}
+
+	subs := []string{"home:index"}
+	for _, p := range products {
+		subs = append(subs, "product:"+p.ID)
+	}
+	for id := range categories {
+		subs = append(subs, "category:"+id)
+	}
+
+	return data, subs
 }

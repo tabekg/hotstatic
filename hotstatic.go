@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"html/template"
 	"log/slog"
-	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -202,8 +201,7 @@ func (hs *HotStatic) Emit(key, action string) error {
 }
 
 // EmitWithPayload triggers a rebuild with entity data.
-// When payload is provided, DataLoader will NOT be called - the payload is used directly.
-// This is useful when you already have the updated data and want to avoid extra DB queries.
+// The payload is passed directly to the template for rendering.
 func (hs *HotStatic) EmitWithPayload(key, action string, payload map[string]any) error {
 	return hs.EmitEvent(Event{
 		Type:      strings.Split(key, ":")[0],
@@ -260,8 +258,8 @@ func (hs *HotStatic) EmitMulti(keys []string, action string) error {
 	return nil
 }
 
-// Build immediately builds a page by path.
-func (hs *HotStatic) Build(ctx context.Context, pagePath string) (*BuildResult, error) {
+// Build immediately builds a page by path with the given payload.
+func (hs *HotStatic) Build(ctx context.Context, pagePath string, payload map[string]any) (*BuildResult, error) {
 	meta, err := hs.registry.GetPage(ctx, pagePath)
 	if err != nil {
 		return nil, err
@@ -270,24 +268,12 @@ func (hs *HotStatic) Build(ctx context.Context, pagePath string) (*BuildResult, 
 		return nil, fmt.Errorf("page not found: %s", pagePath)
 	}
 
-	return hs.buildPage(ctx, meta)
+	return hs.buildPageWithPayload(ctx, meta, payload)
 }
 
-// BuildAll rebuilds all registered pages.
-func (hs *HotStatic) BuildAll(ctx context.Context) error {
-	pages, err := hs.registry.ListPages(ctx)
-	if err != nil {
-		return err
-	}
-
-	for _, path := range pages {
-		hs.queue.Push(queue.Item{
-			Path:     path,
-			Priority: 0,
-		})
-	}
-
-	return nil
+// ListPages returns all registered page paths.
+func (hs *HotStatic) ListPages(ctx context.Context) ([]string, error) {
+	return hs.registry.ListPages(ctx)
 }
 
 // Subscribe registers a page with subscriptions.
@@ -307,63 +293,22 @@ func (hs *HotStatic) Unsubscribe(ctx context.Context, pagePath string) error {
 	return hs.registry.Unsubscribe(ctx, pagePath)
 }
 
-// GeneratePages creates pages from a page config and data source.
-func (hs *HotStatic) GeneratePages(ctx context.Context, configName string, ids []string) error {
-	hs.mu.RLock()
-	cfg, ok := hs.pageConfigs[configName]
-	hs.mu.RUnlock()
-
-	if !ok {
-		return fmt.Errorf("page config not found: %s", configName)
+// GeneratePage creates a single page with the given data and subscriptions.
+func (hs *HotStatic) GeneratePage(ctx context.Context, page Page, data map[string]any) error {
+	// Subscribe page
+	err := hs.Subscribe(ctx, page)
+	if err != nil {
+		return fmt.Errorf("subscribe %s: %w", page.Path, err)
 	}
 
-	for _, id := range ids {
-		params := extractParams(cfg.PathPattern, id)
-
-		// Check condition
-		if cfg.Condition != nil && !cfg.Condition(params) {
-			continue
-		}
-
-		// Load data
-		data, subs, err := cfg.DataLoader(ctx, params)
-		if err != nil {
-			hs.logger.Error("data loader failed",
-				slog.String("config", configName),
-				slog.String("id", id),
-				slog.String("error", err.Error()),
-			)
-			continue
-		}
-
-		// Build path
-		path := buildPath(cfg.PathPattern, params)
-
-		// Subscribe page
-		err = hs.Subscribe(ctx, Page{
-			Path:          path,
-			Template:      cfg.Template,
-			Subscriptions: subs,
-			Params:        params,
-		})
-		if err != nil {
-			return fmt.Errorf("subscribe %s: %w", path, err)
-		}
-
-		// Build immediately
-		result, err := hs.builder.Build(ctx, cfg.Template, path, data)
-		if err != nil {
-			hs.logger.Error("build failed",
-				slog.String("path", path),
-				slog.String("error", err.Error()),
-			)
-			continue
-		}
-
-		// Update registry
-		hs.registry.UpdateLastBuilt(ctx, path, time.Now(), result.ContentHash)
+	// Build immediately
+	result, err := hs.builder.Build(ctx, page.Template, page.Path, data)
+	if err != nil {
+		return fmt.Errorf("build %s: %w", page.Path, err)
 	}
 
+	// Update registry
+	hs.registry.UpdateLastBuilt(ctx, page.Path, time.Now(), result.ContentHash)
 	return nil
 }
 
@@ -426,6 +371,13 @@ func (hs *HotStatic) processResults() {
 }
 
 func (hs *HotStatic) buildHandler(ctx context.Context, job worker.Job) error {
+	if len(job.Payload) == 0 {
+		hs.logger.Warn("skipping rebuild - no payload provided",
+			slog.String("path", job.Path),
+		)
+		return nil
+	}
+
 	meta, err := hs.registry.GetPage(ctx, job.Path)
 	if err != nil {
 		return err
@@ -438,62 +390,16 @@ func (hs *HotStatic) buildHandler(ctx context.Context, job worker.Job) error {
 	return err
 }
 
-func (hs *HotStatic) buildPage(ctx context.Context, meta *registry.PageMeta) (*BuildResult, error) {
-	return hs.buildPageWithPayload(ctx, meta, nil)
-}
-
 func (hs *HotStatic) buildPageWithPayload(ctx context.Context, meta *registry.PageMeta, payload map[string]any) (*BuildResult, error) {
 	start := time.Now()
 
-	// Find page config
-	hs.mu.RLock()
-	var cfg *PageConfig
-	for _, c := range hs.pageConfigs {
-		if c.Template == meta.Template {
-			cfg = c
-			break
-		}
-	}
-	hs.mu.RUnlock()
-
-	if cfg == nil {
-		return nil, fmt.Errorf("page config not found for template: %s", meta.Template)
-	}
-
-	var data any
-	var subs []string
-	var err error
-
-	// Use payload if provided, otherwise call DataLoader
-	if len(payload) > 0 {
-		data = payload
-		subs = meta.Subscriptions // Keep existing subscriptions
-		hs.logger.Debug("using payload data",
-			slog.String("path", meta.Path),
-			slog.Int("payload_keys", len(payload)),
-		)
-	} else {
-		// Load fresh data from DataLoader
-		data, subs, err = cfg.DataLoader(ctx, meta.Params)
-		if err != nil {
-			return &BuildResult{
-				Page:      Page{Path: meta.Path},
-				Success:   false,
-				Error:     err.Error(),
-				Duration:  time.Since(start),
-				Timestamp: time.Now(),
-			}, err
-		}
-	}
-
-	// Update subscriptions if changed
-	if !equalSlices(subs, meta.Subscriptions) {
-		meta.Subscriptions = subs
-		hs.registry.Subscribe(ctx, *meta)
-	}
+	hs.logger.Debug("building page",
+		slog.String("path", meta.Path),
+		slog.Int("payload_keys", len(payload)),
+	)
 
 	// Build
-	result, err := hs.builder.Build(ctx, meta.Template, meta.Path, data)
+	result, err := hs.builder.Build(ctx, meta.Template, meta.Path, payload)
 	if err != nil {
 		return &BuildResult{
 			Page:      Page{Path: meta.Path},
@@ -525,38 +431,10 @@ func (hs *HotStatic) buildPageWithPayload(ctx context.Context, meta *registry.Pa
 
 // Helper functions
 
-var paramRegex = regexp.MustCompile(`\{(\w+)\}`)
-
-func extractParams(pattern, id string) map[string]string {
-	params := make(map[string]string)
-	params["id"] = id
-
-	matches := paramRegex.FindAllStringSubmatch(pattern, -1)
-	for _, m := range matches {
-		if m[1] == "id" {
-			params["id"] = id
-		}
-	}
-
-	return params
-}
-
 func buildPath(pattern string, params map[string]string) string {
 	result := pattern
 	for key, value := range params {
 		result = strings.ReplaceAll(result, "{"+key+"}", value)
 	}
 	return result
-}
-
-func equalSlices(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

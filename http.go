@@ -99,19 +99,25 @@ func (h *HTTPHandler) handleEventBatch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleBuild triggers a specific page rebuild.
+// handleBuild triggers a specific page rebuild with payload.
 // POST /api/build
-// Body: {"path": "/products/123.html"}
+// Body: {"path": "/products/123.html", "payload": {"Product": {...}, ...}}
 func (h *HTTPHandler) handleBuild(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Path string `json:"path"`
+		Path    string         `json:"path"`
+		Payload map[string]any `json:"payload"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.jsonError(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
 
-	result, err := h.hs.Build(r.Context(), req.Path)
+	if len(req.Payload) == 0 {
+		h.jsonError(w, "payload is required", http.StatusBadRequest)
+		return
+	}
+
+	result, err := h.hs.Build(r.Context(), req.Path, req.Payload)
 	if err != nil {
 		h.jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -120,18 +126,10 @@ func (h *HTTPHandler) handleBuild(w http.ResponseWriter, r *http.Request) {
 	h.json(w, result)
 }
 
-// handleBuildAll triggers rebuild of all pages.
+// handleBuildAll is deprecated - without DataLoader, bulk rebuild requires external data.
 // POST /api/build/all
 func (h *HTTPHandler) handleBuildAll(w http.ResponseWriter, r *http.Request) {
-	if err := h.hs.BuildAll(r.Context()); err != nil {
-		h.jsonError(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	h.json(w, map[string]any{
-		"success": true,
-		"message": "rebuild queued",
-	})
+	h.jsonError(w, "build/all is not supported without DataLoader - emit events with payloads instead", http.StatusNotImplemented)
 }
 
 // handleStats returns current statistics.
@@ -197,10 +195,10 @@ func (h *HTTPHandler) handleDeletePage(w http.ResponseWriter, r *http.Request) {
 func (h *HTTPHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	stats := h.hs.Stats()
 	h.json(w, map[string]any{
-		"status":        "healthy",
-		"uptime":        stats.Uptime.String(),
-		"pages_total":   stats.PagesTotal,
-		"queue_length":  stats.QueueLength,
+		"status":         "healthy",
+		"uptime":         stats.Uptime.String(),
+		"pages_total":    stats.PagesTotal,
+		"queue_length":   stats.QueueLength,
 		"workers_active": stats.WorkersActive,
 	})
 }

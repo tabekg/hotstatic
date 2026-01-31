@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
@@ -10,6 +9,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"fmt"
 
 	"github.com/tabekg/hotstatic"
 )
@@ -64,69 +65,15 @@ func main() {
 	hs.RegisterTemplate("product-detail", productTemplate)
 	hs.RegisterTemplate("category-list", categoryTemplate)
 
-	// Регистрация конфигурации страниц
+	// Регистрация конфигурации страниц (для будущего использования)
 	hs.RegisterPage("product-detail", hotstatic.PageConfig{
 		PathPattern: "/products/{id}.html",
 		Template:    "product-detail",
-		DataLoader: func(ctx context.Context, params map[string]string) (any, []string, error) {
-			id := params["id"]
-			product, ok := products[id]
-			if !ok {
-				return nil, nil, fmt.Errorf("product not found: %s", id)
-			}
-
-			// Данные для шаблона
-			data := map[string]any{
-				"Product":     product,
-				"Brand":       brands[product.BrandID],
-				"Category":    categories[product.CategoryID],
-				"GeneratedAt": time.Now().Format(time.RFC3339),
-			}
-
-			// Подписки - страница зависит от:
-			subscriptions := []string{
-				"product:" + product.ID,          // самого товара
-				"brand:" + product.BrandID,       // бренда
-				"category:" + product.CategoryID, // категории
-			}
-
-			return data, subscriptions, nil
-		},
 	})
 
 	hs.RegisterPage("category-list", hotstatic.PageConfig{
 		PathPattern: "/categories/{id}.html",
 		Template:    "category-list",
-		DataLoader: func(ctx context.Context, params map[string]string) (any, []string, error) {
-			categoryID := params["id"]
-			categoryName, ok := categories[categoryID]
-			if !ok {
-				return nil, nil, fmt.Errorf("category not found: %s", categoryID)
-			}
-
-			// Собираем товары категории
-			var categoryProducts []Product
-			for _, p := range products {
-				if p.CategoryID == categoryID {
-					categoryProducts = append(categoryProducts, p)
-				}
-			}
-
-			data := map[string]any{
-				"CategoryID":   categoryID,
-				"CategoryName": categoryName,
-				"Products":     categoryProducts,
-				"GeneratedAt":  time.Now().Format(time.RFC3339),
-			}
-
-			// Страница категории подписана на все товары этой категории
-			subs := []string{"category:" + categoryID}
-			for _, p := range categoryProducts {
-				subs = append(subs, "product:"+p.ID)
-			}
-
-			return data, subs, nil
-		},
 	})
 
 	// Запуск
@@ -136,15 +83,56 @@ func main() {
 	ctx := context.Background()
 
 	// Генерируем страницы товаров
-	productIDs := []string{"1", "2", "3"}
-	if err := hs.GeneratePages(ctx, "product-detail", productIDs); err != nil {
-		log.Printf("generate product pages: %v", err)
+	for id, product := range products {
+		data := map[string]any{
+			"Product":     product,
+			"Brand":       brands[product.BrandID],
+			"Category":    categories[product.CategoryID],
+			"GeneratedAt": time.Now().Format(time.RFC3339),
+		}
+		subscriptions := []string{
+			"product:" + product.ID,
+			"brand:" + product.BrandID,
+			"category:" + product.CategoryID,
+		}
+		err := hs.GeneratePage(ctx, hotstatic.Page{
+			Path:          "/products/" + id + ".html",
+			Template:      "product-detail",
+			Subscriptions: subscriptions,
+			Params:        map[string]string{"id": id},
+		}, data)
+		if err != nil {
+			log.Printf("generate product %s: %v", id, err)
+		}
 	}
 
 	// Генерируем страницы категорий
-	categoryIDs := []string{"phones", "laptops"}
-	if err := hs.GeneratePages(ctx, "category-list", categoryIDs); err != nil {
-		log.Printf("generate category pages: %v", err)
+	for categoryID, categoryName := range categories {
+		var categoryProducts []Product
+		for _, p := range products {
+			if p.CategoryID == categoryID {
+				categoryProducts = append(categoryProducts, p)
+			}
+		}
+		data := map[string]any{
+			"CategoryID":   categoryID,
+			"CategoryName": categoryName,
+			"Products":     categoryProducts,
+			"GeneratedAt":  time.Now().Format(time.RFC3339),
+		}
+		subs := []string{"category:" + categoryID}
+		for _, p := range categoryProducts {
+			subs = append(subs, "product:"+p.ID)
+		}
+		err := hs.GeneratePage(ctx, hotstatic.Page{
+			Path:          "/categories/" + categoryID + ".html",
+			Template:      "category-list",
+			Subscriptions: subs,
+			Params:        map[string]string{"id": categoryID},
+		}, data)
+		if err != nil {
+			log.Printf("generate category %s: %v", categoryID, err)
+		}
 	}
 
 	fmt.Println("Initial pages generated!")
@@ -169,9 +157,15 @@ func main() {
 	fmt.Println("  POST /api/build/all    - rebuild all pages")
 	fmt.Println("  POST /webhook          - webhook endpoint")
 
-	// Пример: эмитируем событие обновления товара
+	// Пример: эмитируем событие обновления товара с данными
 	fmt.Println("\n--- Emitting product update event ---")
-	hs.Emit("product:1", "updated")
+	product := products["1"]
+	hs.EmitWithPayload("product:1", "updated", map[string]any{
+		"Product":     product,
+		"Brand":       brands[product.BrandID],
+		"Category":    categories[product.CategoryID],
+		"GeneratedAt": time.Now().Format(time.RFC3339),
+	})
 
 	// Ждём обработки
 	time.Sleep(100 * time.Millisecond)

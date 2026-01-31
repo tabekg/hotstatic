@@ -20,17 +20,11 @@ type TemplPageConfig struct {
 	// PathPattern with placeholders (e.g., "/products/{id}.html")
 	PathPattern string
 
-	// Component factory creates the templ component from loaded data
+	// Component factory creates the templ component from data
 	Component func(ctx context.Context, params map[string]string, data any) templ.Component
-
-	// DataLoader fetches data and returns subscriptions
-	DataLoader func(ctx context.Context, params map[string]string) (any, []string, error)
 
 	// Priority for rebuild queue (default: 0)
 	Priority int
-
-	// Condition optional filter - return false to skip page
-	Condition func(params map[string]string) bool
 }
 
 // TemplHotStatic extends HotStatic with templ support.
@@ -64,8 +58,8 @@ func (ths *TemplHotStatic) RegisterTemplPage(name string, cfg TemplPageConfig) {
 	ths.templConfigs[name] = &cfg
 }
 
-// GenerateTemplPages generates pages using templ components.
-func (ths *TemplHotStatic) GenerateTemplPages(ctx context.Context, configName string, ids []string) error {
+// GenerateTemplPage generates a single page using templ component.
+func (ths *TemplHotStatic) GenerateTemplPage(ctx context.Context, configName string, page Page, data any) error {
 	ths.mu.RLock()
 	cfg, ok := ths.templConfigs[configName]
 	ths.mu.RUnlock()
@@ -74,61 +68,35 @@ func (ths *TemplHotStatic) GenerateTemplPages(ctx context.Context, configName st
 		return fmt.Errorf("templ page config not found: %s", configName)
 	}
 
-	for _, id := range ids {
-		params := extractParams(cfg.PathPattern, id)
+	fullPath := ths.config.OutputDir + page.Path
 
-		// Check condition
-		if cfg.Condition != nil && !cfg.Condition(params) {
-			continue
-		}
+	// Create component
+	component := cfg.Component(ctx, page.Params, data)
 
-		// Load data
-		data, subs, err := cfg.DataLoader(ctx, params)
-		if err != nil {
-			ths.logger.Error("data loader failed",
-				"config", configName,
-				"id", id,
-				"error", err.Error(),
-			)
-			continue
-		}
+	// Render and write
+	result, err := builder.WriteComponent(ctx, component, fullPath)
+	if err != nil {
+		return fmt.Errorf("templ build %s: %w", page.Path, err)
+	}
 
-		// Build path
-		path := buildPath(cfg.PathPattern, params)
-		fullPath := ths.config.OutputDir + path
-
-		// Create component
-		component := cfg.Component(ctx, params, data)
-
-		// Render and write
-		result, err := builder.WriteComponent(ctx, component, fullPath)
-		if err != nil {
-			ths.logger.Error("templ build failed",
-				"path", path,
-				"error", err.Error(),
-			)
-			continue
-		}
-
-		// Subscribe page
-		err = ths.registry.Subscribe(ctx, registry.PageMeta{
-			Path:          path,
-			Template:      "templ:" + configName,
-			Params:        params,
-			Subscriptions: subs,
-			LastBuilt:     time.Now(),
-			ContentHash:   result.ContentHash,
-		})
-		if err != nil {
-			return fmt.Errorf("subscribe %s: %w", path, err)
-		}
+	// Subscribe page
+	err = ths.registry.Subscribe(ctx, registry.PageMeta{
+		Path:          page.Path,
+		Template:      "templ:" + configName,
+		Params:        page.Params,
+		Subscriptions: page.Subscriptions,
+		LastBuilt:     time.Now(),
+		ContentHash:   result.ContentHash,
+	})
+	if err != nil {
+		return fmt.Errorf("subscribe %s: %w", page.Path, err)
 	}
 
 	return nil
 }
 
-// BuildTemplPage rebuilds a single templ page.
-func (ths *TemplHotStatic) BuildTemplPage(ctx context.Context, pagePath string) (*BuildResult, error) {
+// BuildTemplPage rebuilds a single templ page with the given data.
+func (ths *TemplHotStatic) BuildTemplPage(ctx context.Context, pagePath string, data any) (*BuildResult, error) {
 	meta, err := ths.registry.GetPage(ctx, pagePath)
 	if err != nil {
 		return nil, err
@@ -140,7 +108,10 @@ func (ths *TemplHotStatic) BuildTemplPage(ctx context.Context, pagePath string) 
 	// Check if it's a templ page
 	if !strings.HasPrefix(meta.Template, "templ:") {
 		// Fallback to regular build
-		return ths.Build(ctx, pagePath)
+		if payload, ok := data.(map[string]any); ok {
+			return ths.Build(ctx, pagePath, payload)
+		}
+		return nil, fmt.Errorf("non-templ page requires map[string]any payload")
 	}
 
 	configName := strings.TrimPrefix(meta.Template, "templ:")
@@ -154,24 +125,6 @@ func (ths *TemplHotStatic) BuildTemplPage(ctx context.Context, pagePath string) 
 	}
 
 	start := time.Now()
-
-	// Load fresh data
-	data, subs, err := cfg.DataLoader(ctx, meta.Params)
-	if err != nil {
-		return &BuildResult{
-			Page:      Page{Path: meta.Path},
-			Success:   false,
-			Error:     err.Error(),
-			Duration:  time.Since(start),
-			Timestamp: time.Now(),
-		}, err
-	}
-
-	// Update subscriptions if changed
-	if !equalSlices(subs, meta.Subscriptions) {
-		meta.Subscriptions = subs
-		ths.registry.Subscribe(ctx, *meta)
-	}
 
 	// Create and render component
 	fullPath := ths.config.OutputDir + meta.Path

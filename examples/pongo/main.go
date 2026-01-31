@@ -130,11 +130,6 @@ func main() {
 	}
 	defer hs.Stop()
 
-	// Register page configurations
-	registerProductPage(hs)
-	registerCategoryPage(hs)
-	registerHomePage(hs)
-
 	// Start processing
 	hs.Start()
 
@@ -144,21 +139,48 @@ func main() {
 	fmt.Println("🚀 Generating pages...")
 
 	// Generate product pages
-	productIDs := []string{"1", "2", "3", "4", "5"}
-	if err := hs.GeneratePongoPages(ctx, "product-detail", productIDs); err != nil {
-		log.Printf("generate products: %v", err)
+	for id, product := range products {
+		data, subs := getProductPageData(product)
+		err := hs.GeneratePongoPage(ctx, hotstatic.Page{
+			Path:          "/products/" + id + ".html",
+			Template:      "pages/product.html",
+			Subscriptions: subs,
+			Params:        map[string]string{"id": id},
+		}, data)
+		if err != nil {
+			log.Printf("generate product %s: %v", id, err)
+		}
 	}
-	fmt.Printf("   ✓ Generated %d product pages\n", len(productIDs))
+	fmt.Printf("   ✓ Generated %d product pages\n", len(products))
 
 	// Generate category pages
-	categoryIDs := []string{"phones", "laptops"}
-	if err := hs.GeneratePongoPages(ctx, "category-list", categoryIDs); err != nil {
-		log.Printf("generate categories: %v", err)
+	for categoryID := range categories {
+		data, subs, err := getCategoryPageData(categoryID)
+		if err != nil {
+			log.Printf("get category data %s: %v", categoryID, err)
+			continue
+		}
+		err = hs.GeneratePongoPage(ctx, hotstatic.Page{
+			Path:          "/categories/" + categoryID + ".html",
+			Template:      "pages/category.html",
+			Subscriptions: subs,
+			Params:        map[string]string{"id": categoryID},
+		}, data)
+		if err != nil {
+			log.Printf("generate category %s: %v", categoryID, err)
+		}
 	}
-	fmt.Printf("   ✓ Generated %d category pages\n", len(categoryIDs))
+	fmt.Printf("   ✓ Generated %d category pages\n", len(categories))
 
 	// Generate home page
-	if err := hs.GeneratePongoPages(ctx, "home", []string{"index"}); err != nil {
+	homeData, homeSubs := getHomePageData()
+	err = hs.GeneratePongoPage(ctx, hotstatic.Page{
+		Path:          "/index.html",
+		Template:      "pages/home.html",
+		Subscriptions: homeSubs,
+		Params:        map[string]string{},
+	}, homeData)
+	if err != nil {
 		log.Printf("generate home: %v", err)
 	}
 	fmt.Println("   ✓ Generated home page")
@@ -204,7 +226,9 @@ func main() {
 	go func() {
 		time.Sleep(5 * time.Second)
 		fmt.Println("\n⚡ Auto-emitting product update event...")
-		hs.Emit("product:1", "updated")
+		product := products["1"]
+		data, _ := getProductPageData(product)
+		hs.EmitWithPayload("product:1", "updated", data)
 	}()
 
 	// Запуск сервера в горутине
@@ -231,120 +255,86 @@ func main() {
 	fmt.Println("✅ Shutdown complete")
 }
 
-func registerProductPage(hs *hotstatic.PongoHotStatic) {
-	hs.RegisterPongoPage("product-detail", hotstatic.PongoPageConfig{
-		PathPattern: "/products/{id}.html",
-		Template:    "pages/product.html",
-		DataLoader: func(ctx context.Context, params map[string]string) (map[string]any, []string, error) {
-			id := params["id"]
-			product, ok := products[id]
-			if !ok {
-				return nil, nil, fmt.Errorf("product not found: %s", id)
-			}
+// Helper functions to prepare page data
 
-			// Template context
-			data := map[string]any{
-				"product":    product,
-				"active_nav": product.CategoryID,
-				"breadcrumb": []map[string]string{
-					{"label": "Home", "url": "/"},
-					{"label": product.CategoryName, "url": "/categories/" + product.CategoryID + ".html"},
-					{"label": product.Name, "url": ""},
-				},
-			}
-
-			// Subscriptions
-			subscriptions := []string{
-				"product:" + product.ID,
-				"brand:" + product.BrandID,
-				"category:" + product.CategoryID,
-			}
-
-			return data, subscriptions, nil
+func getProductPageData(product Product) (map[string]any, []string) {
+	data := map[string]any{
+		"product":    product,
+		"active_nav": product.CategoryID,
+		"breadcrumb": []map[string]string{
+			{"label": "Home", "url": "/"},
+			{"label": product.CategoryName, "url": "/categories/" + product.CategoryID + ".html"},
+			{"label": product.Name, "url": ""},
 		},
-	})
+	}
+	subscriptions := []string{
+		"product:" + product.ID,
+		"brand:" + product.BrandID,
+		"category:" + product.CategoryID,
+	}
+	return data, subscriptions
 }
 
-func registerCategoryPage(hs *hotstatic.PongoHotStatic) {
-	hs.RegisterPongoPage("category-list", hotstatic.PongoPageConfig{
-		PathPattern: "/categories/{id}.html",
-		Template:    "pages/category.html",
-		DataLoader: func(ctx context.Context, params map[string]string) (map[string]any, []string, error) {
-			categoryID := params["id"]
-			category, ok := categories[categoryID]
-			if !ok {
-				return nil, nil, fmt.Errorf("category not found: %s", categoryID)
-			}
+func getCategoryPageData(categoryID string) (map[string]any, []string, error) {
+	category, ok := categories[categoryID]
+	if !ok {
+		return nil, nil, fmt.Errorf("category not found: %s", categoryID)
+	}
 
-			// Collect products in this category
-			var categoryProducts []Product
-			for _, p := range products {
-				if p.CategoryID == categoryID {
-					categoryProducts = append(categoryProducts, p)
-				}
-			}
+	var categoryProducts []Product
+	for _, p := range products {
+		if p.CategoryID == categoryID {
+			categoryProducts = append(categoryProducts, p)
+		}
+	}
 
-			// Template context
-			data := map[string]any{
-				"category":   category,
-				"products":   categoryProducts,
-				"active_nav": categoryID,
-				"breadcrumb": []map[string]string{
-					{"label": "Home", "url": "/"},
-					{"label": category.Name, "url": ""},
-				},
-			}
-
-			// Subscriptions
-			subs := []string{"category:" + categoryID}
-			for _, p := range categoryProducts {
-				subs = append(subs, "product:"+p.ID)
-			}
-
-			return data, subs, nil
+	data := map[string]any{
+		"category":   category,
+		"products":   categoryProducts,
+		"active_nav": categoryID,
+		"breadcrumb": []map[string]string{
+			{"label": "Home", "url": "/"},
+			{"label": category.Name, "url": ""},
 		},
-	})
+	}
+
+	subs := []string{"category:" + categoryID}
+	for _, p := range categoryProducts {
+		subs = append(subs, "product:"+p.ID)
+	}
+
+	return data, subs, nil
 }
 
-func registerHomePage(hs *hotstatic.PongoHotStatic) {
-	hs.RegisterPongoPage("home", hotstatic.PongoPageConfig{
-		PathPattern: "/index.html",
-		Template:    "pages/home.html",
-		DataLoader: func(ctx context.Context, params map[string]string) (map[string]any, []string, error) {
-			// Featured products (first 4)
-			var featured []Product
-			for _, p := range products {
-				if p.InStock {
-					featured = append(featured, p)
-					if len(featured) >= 4 {
-						break
-					}
-				}
+func getHomePageData() (map[string]any, []string) {
+	var featured []Product
+	for _, p := range products {
+		if p.InStock {
+			featured = append(featured, p)
+			if len(featured) >= 4 {
+				break
 			}
+		}
+	}
 
-			// Categories with counts
-			var cats []Category
-			for _, cat := range categories {
-				cats = append(cats, cat)
-			}
+	var cats []Category
+	for _, cat := range categories {
+		cats = append(cats, cat)
+	}
 
-			// Template context
-			data := map[string]any{
-				"featured_products": featured,
-				"categories":        cats,
-				"active_nav":        "home",
-			}
+	data := map[string]any{
+		"featured_products": featured,
+		"categories":        cats,
+		"active_nav":        "home",
+	}
 
-			// Subscriptions - home page depends on everything
-			subs := []string{"home:index"}
-			for _, p := range products {
-				subs = append(subs, "product:"+p.ID)
-			}
-			for id := range categories {
-				subs = append(subs, "category:"+id)
-			}
+	subs := []string{"home:index"}
+	for _, p := range products {
+		subs = append(subs, "product:"+p.ID)
+	}
+	for id := range categories {
+		subs = append(subs, "category:"+id)
+	}
 
-			return data, subs, nil
-		},
-	})
+	return data, subs
 }
