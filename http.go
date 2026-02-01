@@ -2,8 +2,10 @@ package hotstatic
 
 import (
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -288,11 +290,16 @@ func (s *StaticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *StaticHandler) serve404(w http.ResponseWriter, r *http.Request) {
 	if s.notFoundPage != "" {
 		notFoundPath := s.outputDir + "/" + s.notFoundPage
-		if content, err := http.Dir(s.outputDir).Open("/" + s.notFoundPage); err == nil {
-			content.Close()
-			w.WriteHeader(http.StatusNotFound)
-			http.ServeFile(w, r, notFoundPath)
-			return
+		if content, err := os.Open(notFoundPath); err == nil {
+			defer content.Close()
+			stat, err := content.Stat()
+			if err == nil {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusNotFound)
+				io.Copy(w, content)
+				_ = stat // used for potential future Content-Length
+				return
+			}
 		}
 	}
 
