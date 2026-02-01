@@ -130,6 +130,7 @@ type PongoHotStatic struct {
 	pongoBuilder *builder.PongoBuilder
 	pongoConfigs map[string]*PongoPageConfig
 	builderFunc  BuilderFunc
+	resolvers    map[string]ResolverFunc // entity type -> resolver
 	mu           sync.RWMutex
 }
 
@@ -153,6 +154,7 @@ func NewWithPongo(cfg Config) (*PongoHotStatic, error) {
 	phs := &PongoHotStatic{
 		pongoBuilder: pongoBuilder,
 		pongoConfigs: make(map[string]*PongoPageConfig),
+		resolvers:    make(map[string]ResolverFunc),
 	}
 
 	// Set custom build handler that knows about pongo configs
@@ -285,6 +287,112 @@ func (phs *PongoHotStatic) AddGlobal(name string, value any) {
 // ReloadTemplates reloads all templates from disk.
 func (phs *PongoHotStatic) ReloadTemplates() error {
 	return phs.pongoBuilder.LoadTemplates()
+}
+
+// SetResolver registers a resolver function for an entity type.
+// When an event of this type is received, the resolver transforms it into PageData.
+//
+// Example:
+//
+//	hs.SetResolver("product", func(ctx context.Context, event hotstatic.Event) (*hotstatic.PageData, error) {
+//	    product := getProduct(event.ID)
+//	    return &hotstatic.PageData{
+//	        Template: "pages/product.jinja2",
+//	        Output:   "/products/" + event.ID + ".html",
+//	        Data: map[string]any{
+//	            "product": product,
+//	            "brand":   getBrand(product.BrandID),
+//	        },
+//	        Dependencies: []string{"product:" + event.ID, "brand:" + product.BrandID},
+//	    }, nil
+//	})
+func (phs *PongoHotStatic) SetResolver(entityType string, fn ResolverFunc) {
+	phs.mu.Lock()
+	defer phs.mu.Unlock()
+	phs.resolvers[entityType] = fn
+}
+
+// GetResolver returns the resolver for an entity type, or nil if not found.
+func (phs *PongoHotStatic) GetResolver(entityType string) ResolverFunc {
+	phs.mu.RLock()
+	defer phs.mu.RUnlock()
+	return phs.resolvers[entityType]
+}
+
+// BuildWithResolver builds a page using the resolver for the given event.
+// Returns error if no resolver is registered for the event type.
+func (phs *PongoHotStatic) BuildWithResolver(ctx context.Context, event Event) (*BuildResult, error) {
+	phs.mu.RLock()
+	resolver, ok := phs.resolvers[event.Type]
+	phs.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("no resolver for entity type: %s", event.Type)
+	}
+
+	// Call resolver to get page data
+	pageData, err := resolver(ctx, event)
+	if err != nil {
+		return nil, fmt.Errorf("resolver error: %w", err)
+	}
+
+	if pageData == nil {
+		// Resolver returned nil - skip this event (e.g., deleted entity)
+		return &BuildResult{
+			Success:   true,
+			Timestamp: time.Now(),
+		}, nil
+	}
+
+	start := time.Now()
+
+	// Add common context
+	if pageData.Data == nil {
+		pageData.Data = make(map[string]any)
+	}
+	pageData.Data["_path"] = pageData.Output
+	pageData.Data["_generated_at"] = time.Now()
+
+	// Build the page
+	result, err := phs.pongoBuilder.Build(ctx, pageData.Template, pageData.Output, pageData.Data)
+	if err != nil {
+		return &BuildResult{
+			Page:      Page{Path: pageData.Output},
+			Success:   false,
+			Error:     err.Error(),
+			Duration:  time.Since(start),
+			Timestamp: time.Now(),
+		}, err
+	}
+
+	// Register dependencies
+	err = phs.registry.AddDependencies(ctx, registry.PageMeta{
+		Path:         pageData.Output,
+		Template:     "pongo:" + pageData.Template,
+		Dependencies: pageData.Dependencies,
+		LastBuilt:    time.Now(),
+		ContentHash:  result.ContentHash,
+	})
+	if err != nil {
+		phs.logger.Error("add dependencies failed",
+			slog.String("output", pageData.Output),
+			slog.String("error", err.Error()),
+		)
+	}
+
+	return &BuildResult{
+		Page: Page{
+			Path:         pageData.Output,
+			Template:     "pongo:" + pageData.Template,
+			Dependencies: pageData.Dependencies,
+			LastBuilt:    time.Now(),
+			ContentHash:  result.ContentHash,
+		},
+		Success:   true,
+		Duration:  time.Since(start),
+		Changed:   result.Changed,
+		Timestamp: time.Now(),
+	}, nil
 }
 
 // SetBuilder sets the builder function that defines how pages are built.
@@ -552,9 +660,34 @@ func (phs *PongoHotStatic) rebuildAll(ctx context.Context) {
 
 // pongoBuildHandler handles page rebuild jobs for both pongo and standard pages.
 func (phs *PongoHotStatic) pongoBuildHandler(ctx context.Context, job worker.Job) error {
+	// Try to use resolver if available
+	if job.TriggerKey != "" {
+		parts := strings.SplitN(job.TriggerKey, ":", 2)
+		if len(parts) == 2 {
+			entityType := parts[0]
+			entityID := parts[1]
+
+			phs.mu.RLock()
+			resolver, hasResolver := phs.resolvers[entityType]
+			phs.mu.RUnlock()
+
+			if hasResolver {
+				event := Event{
+					Type:    entityType,
+					ID:      entityID,
+					Payload: job.Payload,
+				}
+				_, err := phs.buildWithResolverInternal(ctx, resolver, event)
+				return err
+			}
+		}
+	}
+
+	// No resolver - fall back to old behavior (requires payload)
 	if len(job.Payload) == 0 {
-		phs.logger.Warn("skipping rebuild - no payload provided",
+		phs.logger.Warn("skipping rebuild - no payload and no resolver",
 			"path", job.Path,
+			"trigger", job.TriggerKey,
 		)
 		return nil
 	}
@@ -576,6 +709,84 @@ func (phs *PongoHotStatic) pongoBuildHandler(ctx context.Context, job worker.Job
 	// Fall back to base handler for non-pongo pages
 	_, err = phs.buildPageWithPayload(ctx, meta, job.Payload)
 	return err
+}
+
+// buildWithResolverInternal is the internal implementation without locking.
+func (phs *PongoHotStatic) buildWithResolverInternal(ctx context.Context, resolver ResolverFunc, event Event) (*BuildResult, error) {
+	// Call resolver to get page data
+	pageData, err := resolver(ctx, event)
+	if err != nil {
+		return nil, fmt.Errorf("resolver error: %w", err)
+	}
+
+	if pageData == nil {
+		// Resolver returned nil - skip this event (e.g., deleted entity)
+		phs.logger.Debug("resolver returned nil, skipping",
+			slog.String("type", event.Type),
+			slog.String("id", event.ID),
+		)
+		return &BuildResult{
+			Success:   true,
+			Timestamp: time.Now(),
+		}, nil
+	}
+
+	start := time.Now()
+
+	// Add common context
+	if pageData.Data == nil {
+		pageData.Data = make(map[string]any)
+	}
+	pageData.Data["_path"] = pageData.Output
+	pageData.Data["_generated_at"] = time.Now()
+
+	// Build the page
+	result, err := phs.pongoBuilder.Build(ctx, pageData.Template, pageData.Output, pageData.Data)
+	if err != nil {
+		return &BuildResult{
+			Page:      Page{Path: pageData.Output},
+			Success:   false,
+			Error:     err.Error(),
+			Duration:  time.Since(start),
+			Timestamp: time.Now(),
+		}, err
+	}
+
+	// Register dependencies
+	err = phs.registry.AddDependencies(ctx, registry.PageMeta{
+		Path:         pageData.Output,
+		Template:     "pongo:" + pageData.Template,
+		Dependencies: pageData.Dependencies,
+		LastBuilt:    time.Now(),
+		ContentHash:  result.ContentHash,
+	})
+	if err != nil {
+		phs.logger.Error("add dependencies failed",
+			slog.String("output", pageData.Output),
+			slog.String("error", err.Error()),
+		)
+	}
+
+	phs.logger.Debug("built page via resolver",
+		slog.String("type", event.Type),
+		slog.String("id", event.ID),
+		slog.String("output", pageData.Output),
+		slog.Duration("time", time.Since(start)),
+	)
+
+	return &BuildResult{
+		Page: Page{
+			Path:         pageData.Output,
+			Template:     "pongo:" + pageData.Template,
+			Dependencies: pageData.Dependencies,
+			LastBuilt:    time.Now(),
+			ContentHash:  result.ContentHash,
+		},
+		Success:   true,
+		Duration:  time.Since(start),
+		Changed:   result.Changed,
+		Timestamp: time.Now(),
+	}, nil
 }
 
 func (phs *PongoHotStatic) registerDefaultFilters() {

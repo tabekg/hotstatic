@@ -188,6 +188,58 @@ func main() {
 		return nil
 	})
 
+	// Set up resolvers for event-driven rebuilds
+	// When an event comes in, the resolver fetches fresh data and returns PageData
+	hs.SetResolver("product", func(ctx context.Context, event hotstatic.Event) (*hotstatic.PageData, error) {
+		product, ok := products[event.ID]
+		if !ok {
+			// Product deleted or not found - return nil to skip
+			return nil, nil
+		}
+
+		return &hotstatic.PageData{
+			Template: "pages/product.jinja2",
+			Output:   "/products/" + event.ID + ".html",
+			Data: map[string]any{
+				"product":    product,
+				"active_nav": product.CategoryID,
+				"breadcrumb": []map[string]string{
+					{"label": "Home", "url": "/"},
+					{"label": product.CategoryName, "url": "/categories/" + product.CategoryID + ".html"},
+					{"label": product.Name, "url": ""},
+				},
+			},
+			Dependencies: []string{
+				"product:" + product.ID,
+				"brand:" + product.BrandID,
+			},
+		}, nil
+	})
+
+	hs.SetResolver("category", func(ctx context.Context, event hotstatic.Event) (*hotstatic.PageData, error) {
+		category, ok := categories[event.ID]
+		if !ok {
+			return nil, nil
+		}
+
+		categoryProducts := getProductsByCategory(event.ID)
+
+		return &hotstatic.PageData{
+			Template: "pages/category.jinja2",
+			Output:   "/categories/" + event.ID + ".html",
+			Data: map[string]any{
+				"category":   category,
+				"products":   categoryProducts,
+				"active_nav": event.ID,
+				"breadcrumb": []map[string]string{
+					{"label": "Home", "url": "/"},
+					{"label": category.Name, "url": ""},
+				},
+			},
+			Dependencies: []string{"category:" + event.ID},
+		}, nil
+	})
+
 	// Build all pages at startup
 	fmt.Println("Building pages...")
 	if err := hs.BuildAll(ctx); err != nil {
@@ -247,19 +299,12 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	// Demo: emit event after 5 seconds
+	// With resolvers, we just emit the event - no payload needed!
+	// The resolver will fetch fresh data automatically
 	go func() {
 		time.Sleep(5 * time.Second)
 		fmt.Println("\nAuto-emitting product update event...")
-		product := products["1"]
-		hs.EmitWithPayload("product:1", "updated", map[string]any{
-			"product":    product,
-			"active_nav": product.CategoryID,
-			"breadcrumb": []map[string]string{
-				{"label": "Home", "url": "/"},
-				{"label": product.CategoryName, "url": "/categories/" + product.CategoryID + ".html"},
-				{"label": product.Name, "url": ""},
-			},
-		})
+		hs.Emit("product:1", "updated")
 	}()
 
 	go func() {

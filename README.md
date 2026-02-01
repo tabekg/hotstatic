@@ -210,16 +210,72 @@ hotstatic.Config{
 }
 ```
 
+### SetResolver — Define How to Rebuild Pages
+
+Resolvers transform events into page data. When an event is received, the resolver fetches fresh data and returns everything needed to rebuild the page.
+
+```go
+hs.SetResolver("product", func(ctx context.Context, event hotstatic.Event) (*hotstatic.PageData, error) {
+    // Fetch fresh data from your database
+    product := getProduct(event.ID)
+    if product == nil {
+        return nil, nil // Product deleted - skip rebuild
+    }
+    
+    brand := getBrand(product.BrandID)
+    category := getCategory(product.CategoryID)
+    
+    return &hotstatic.PageData{
+        Template: "pages/product.jinja2",
+        Output:   "/products/" + event.ID + ".html",
+        Data: map[string]any{
+            "product":  product,
+            "brand":    brand,
+            "category": category,
+        },
+        Dependencies: []string{
+            "product:" + event.ID,
+            "brand:" + product.BrandID,
+            "category:" + product.CategoryID,
+        },
+    }, nil
+})
+
+hs.SetResolver("category", func(ctx context.Context, event hotstatic.Event) (*hotstatic.PageData, error) {
+    category := getCategory(event.ID)
+    products := getProductsByCategory(event.ID)
+    
+    return &hotstatic.PageData{
+        Template: "pages/category.jinja2",
+        Output:   "/categories/" + event.ID + ".html",
+        Data: map[string]any{
+            "category": category,
+            "products": products,
+        },
+        Dependencies: []string{"category:" + event.ID},
+    }, nil
+})
+```
+
+**Benefits:**
+- Logic in one place: event → data → template → dependencies
+- No need to pass payload with every event
+- Resolver fetches fresh data automatically
+- Easy to test and maintain
+
 ### Emit Event (Trigger Rebuild)
 
 ```go
-// Product updated — send new data
-hs.EmitWithPayload("product:123", "updated", map[string]any{
-    "product": updatedProduct,
-    "brand":   brand,
-})
+// Simple - resolver fetches the data
+hs.Emit("product:123", "updated")
 
 // All pages that depend on "product:123" will rebuild
+// The resolver for "product" is called to get fresh data
+
+// Or with payload (if you already have the data)
+hs.EmitWithPayload("product:123", "updated", map[string]any{
+    "product": updatedProduct,
+})
 ```
 
 ### Event with Priority

@@ -1,6 +1,7 @@
 package hotstatic
 
 import (
+	"context"
 	"time"
 )
 
@@ -101,3 +102,23 @@ type Dependency struct {
 	Key      string `json:"key"`       // e.g., "product:123"
 	PagePath string `json:"page_path"` // e.g., "/products/123.html"
 }
+
+// PageData is returned by a Resolver function.
+// It contains everything needed to build a page from an event.
+type PageData struct {
+	// Template file path (e.g., "pages/product.jinja2")
+	Template string
+
+	// Output path (e.g., "/products/123.html")
+	Output string
+
+	// Data passed to the template
+	Data map[string]any
+
+	// Dependencies - entity keys this page depends on
+	Dependencies []string
+}
+
+// ResolverFunc transforms an event into PageData for rendering.
+// Called when an event is received to determine what page to build and with what data.
+type ResolverFunc func(ctx context.Context, event Event) (*PageData, error)
