@@ -77,6 +77,18 @@ type Config struct {
 	// DevMode enables file watching and auto-rebuild for static pages.
 	DevMode bool
 
+	// WatchDirs is a list of additional directories to watch in dev mode.
+	// Example: []string{"./static", "./assets"}
+	WatchDirs []string
+
+	// OnTemplateChange is called when a template file changes (before rebuild).
+	// Receives the changed file path.
+	OnTemplateChange func(path string)
+
+	// OnWatchedFileChange is called when a file in WatchDirs changes.
+	// Receives the changed file path. Use this to run build tools (e.g., "yarn build").
+	OnWatchedFileChange func(path string)
+
 	// Workers count for parallel building
 	Workers int
 

@@ -119,6 +119,20 @@ hotstatic.Config{
     // Development mode (auto-rebuild on template changes)
     DevMode:       true,
 
+    // Additional directories to watch in dev mode
+    WatchDirs:     []string{"./src", "./assets"},
+
+    // Callback when template changes (before rebuild)
+    OnTemplateChange: func(path string) {
+        fmt.Println("Template changed:", path)
+    },
+
+    // Callback when file in WatchDirs changes
+    OnWatchedFileChange: func(path string) {
+        fmt.Println("Asset changed:", path)
+        exec.Command("yarn", "build").Run()
+    },
+
     // Cache rules for static files
     CacheRules: []hotstatic.CacheRule{
         {Pattern: `\.[a-f0-9]{8}\.(css|js)$`, MaxAge: 31536000, Immutable: true},
@@ -168,8 +182,34 @@ err := hs.BuildAll(ctx)
 ### StartDevMode — Watch Templates for Changes
 
 ```go
-// Watches template directory, calls BuildAll on any change
+// Watches template directory and WatchDirs, calls BuildAll on template change
 err := hs.StartDevMode(ctx)
+```
+
+### Dev Mode Callbacks
+
+```go
+hotstatic.Config{
+    DevMode: true,
+    
+    // Watch additional directories (e.g., source files for assets)
+    WatchDirs: []string{"./src", "./assets"},
+    
+    // Called when template changes (before rebuild)
+    OnTemplateChange: func(path string) {
+        log.Println("Template changed:", path)
+    },
+    
+    // Called when file in WatchDirs changes
+    // Use this to trigger asset builds
+    OnWatchedFileChange: func(path string) {
+        log.Println("Asset changed:", path)
+        cmd := exec.Command("yarn", "build")
+        cmd.Stdout = os.Stdout
+        cmd.Stderr = os.Stderr
+        cmd.Run()
+    },
+}
 ```
 
 ### Emit Event (Trigger Rebuild)

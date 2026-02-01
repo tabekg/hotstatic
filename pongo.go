@@ -374,8 +374,9 @@ func (phs *PongoHotStatic) BuildStaticPages(ctx context.Context) error {
 	return nil
 }
 
-// StartDevMode starts file watcher for templates and static files.
-// On any change, all static pages are rebuilt.
+// StartDevMode starts file watcher for templates and additional directories.
+// On template change, all pages are rebuilt via BuildAll.
+// On watched dir change, OnWatchedFileChange callback is called.
 func (phs *PongoHotStatic) StartDevMode(ctx context.Context) error {
 	if !phs.config.DevMode {
 		return nil
@@ -403,23 +404,45 @@ func (phs *PongoHotStatic) StartDevMode(ctx context.Context) error {
 		return fmt.Errorf("watch template dir: %w", err)
 	}
 
+	// Watch additional directories
+	for _, dir := range phs.config.WatchDirs {
+		err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				return watcher.Add(path)
+			}
+			return nil
+		})
+		if err != nil {
+			phs.logger.Warn("could not watch directory",
+				slog.String("dir", dir),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
+
 	phs.logger.Info("dev mode started",
-		slog.String("watching", templateDir),
-		slog.String("static_pages_dir", phs.config.StaticPagesDir),
+		slog.String("templates", templateDir),
+		slog.Any("watch_dirs", phs.config.WatchDirs),
 	)
 
-	go phs.watchLoop(ctx, watcher)
+	go phs.watchLoop(ctx, watcher, templateDir)
 
 	return nil
 }
 
-func (phs *PongoHotStatic) watchLoop(ctx context.Context, watcher *fsnotify.Watcher) {
+func (phs *PongoHotStatic) watchLoop(ctx context.Context, watcher *fsnotify.Watcher, templateDir string) {
 	defer watcher.Close()
 
-	// Debounce
-	var pending bool
-	var pendingMu sync.Mutex
+	// Debounce state
+	var pendingTemplate bool
+	var pendingWatched bool
+	var lastTemplatePath string
+	var lastWatchedPath string
 	var lastEvent time.Time
+	var mu sync.Mutex
 	debounceDelay := 100 * time.Millisecond
 
 	ticker := time.NewTicker(50 * time.Millisecond)
@@ -440,19 +463,46 @@ func (phs *PongoHotStatic) watchLoop(ctx context.Context, watcher *fsnotify.Watc
 				continue
 			}
 
-			pendingMu.Lock()
-			pending = true
+			mu.Lock()
+			// Check if it's a template file or watched dir file
+			if strings.HasPrefix(event.Name, templateDir) {
+				pendingTemplate = true
+				lastTemplatePath = event.Name
+			} else {
+				pendingWatched = true
+				lastWatchedPath = event.Name
+			}
 			lastEvent = time.Now()
-			pendingMu.Unlock()
+			mu.Unlock()
 
 		case <-ticker.C:
-			pendingMu.Lock()
-			if pending && time.Since(lastEvent) >= debounceDelay {
-				pending = false
-				pendingMu.Unlock()
-				phs.rebuildAll(ctx)
+			mu.Lock()
+			if time.Since(lastEvent) >= debounceDelay {
+				if pendingTemplate {
+					pendingTemplate = false
+					path := lastTemplatePath
+					mu.Unlock()
+
+					// Call callback if set
+					if phs.config.OnTemplateChange != nil {
+						phs.config.OnTemplateChange(path)
+					}
+					phs.rebuildAll(ctx)
+				} else if pendingWatched {
+					pendingWatched = false
+					path := lastWatchedPath
+					mu.Unlock()
+
+					// Call callback if set
+					if phs.config.OnWatchedFileChange != nil {
+						phs.logger.Info("watched file changed", slog.String("path", path))
+						phs.config.OnWatchedFileChange(path)
+					}
+				} else {
+					mu.Unlock()
+				}
 			} else {
-				pendingMu.Unlock()
+				mu.Unlock()
 			}
 
 		case err, ok := <-watcher.Errors:
