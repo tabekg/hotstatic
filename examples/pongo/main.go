@@ -5,11 +5,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
-	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
-	"time"
 
 	"github.com/tabekg/hotstatic"
 )
@@ -31,11 +27,6 @@ type Product struct {
 }
 
 type Category struct {
-	ID   string
-	Name string
-}
-
-type Brand struct {
 	ID   string
 	Name string
 }
@@ -102,12 +93,6 @@ var categories = map[string]*Category{
 	"laptops": {ID: "laptops", Name: "Laptops"},
 }
 
-var brands = map[string]*Brand{
-	"apple":   {ID: "apple", Name: "Apple"},
-	"samsung": {ID: "samsung", Name: "Samsung"},
-	"lenovo":  {ID: "lenovo", Name: "Lenovo"},
-}
-
 // ========== DATA LOADER FUNCTIONS ==========
 
 func getProduct(id string) *Product {
@@ -126,16 +111,6 @@ func getProductsByCategory(categoryID string) []*Product {
 	var result []*Product
 	for _, p := range products {
 		if p.CategoryID == categoryID {
-			result = append(result, p)
-		}
-	}
-	return result
-}
-
-func getProductsByBrand(brandID string) []*Product {
-	var result []*Product
-	for _, p := range products {
-		if p.BrandID == brandID {
 			result = append(result, p)
 		}
 	}
@@ -172,30 +147,27 @@ func getAllCategories() []*Category {
 	return result
 }
 
-func getBrand(id string) *Brand {
-	return brands[id]
-}
-
 // ========== MAIN ==========
 
 func main() {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	devMode := os.Getenv("MODE") == "dev"
-
 	// Initialize HotStatic with pongo2
 	hs, err := hotstatic.NewWithPongo(hotstatic.Config{
 		TemplateDir: "./templates",
 		OutputDir:   "./dist",
-		Workers:     4,
-		Debounce:    time.Second,
-		DevMode:     devMode,
 		Logger:      &slogLogger{logger},
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	// Add global variables available in all templates
+	hs.AddGlobal("site", map[string]any{
+		"name": "TechStore",
+		"url":  "https://techstore.example.com",
+	})
 
 	// ========== DEFINE TEMPLATES ==========
 
@@ -214,12 +186,7 @@ func main() {
 				Data: map[string]any{
 					"product":  product,
 					"category": getCategory(product.CategoryID),
-					"brand":    getBrand(product.BrandID),
-					"breadcrumb": []map[string]string{
-						{"label": "Home", "url": "/"},
-						{"label": product.CategoryName, "url": "/categories/" + product.CategoryID + ".html"},
-						{"label": product.Name, "url": ""},
-					},
+					"related":  getProductsByCategory(product.CategoryID),
 				},
 			}, nil
 		},
@@ -244,10 +211,6 @@ func main() {
 				Data: map[string]any{
 					"category": category,
 					"products": getProductsByCategory(id),
-					"breadcrumb": []map[string]string{
-						{"label": "Home", "url": "/"},
-						{"label": category.Name, "url": ""},
-					},
 				},
 			}, nil
 		},
@@ -272,169 +235,24 @@ func main() {
 		},
 
 		LoadAll: func(ctx context.Context) ([]string, error) {
-			return []string{""}, nil // single home page, empty id
-		},
-	})
-
-	// 404 page
-	hs.DefineTemplate("404", hotstatic.TemplateDef{
-		File: "pages/404.jinja2",
-
-		Load: func(ctx context.Context, id string) (*hotstatic.PageData, error) {
-			return &hotstatic.PageData{
-				Path: "/404.html",
-				Data: map[string]any{},
-			}, nil
-		},
-
-		LoadAll: func(ctx context.Context) ([]string, error) {
 			return []string{""}, nil
 		},
 	})
 
-	// ========== EVENT HANDLER ==========
-
-	hs.OnEvent(func(ctx context.Context, event hotstatic.Event) error {
-		switch event.Type {
-		case "product":
-			switch event.Action {
-			case "created":
-				// New product: build product page, update home and category
-				hs.Build("product", event.ID)
-				hs.Build("home", "")
-				if product := getProduct(event.ID); product != nil {
-					hs.Build("category", product.CategoryID)
-				}
-
-			case "updated":
-				// Product updated: rebuild product page
-				hs.Build("product", event.ID)
-				// Optionally update category/home if price or featured status changed
-				if product := getProduct(event.ID); product != nil {
-					hs.Build("category", product.CategoryID)
-					if product.IsFeatured {
-						hs.Build("home", "")
-					}
-				}
-
-			case "deleted":
-				// Product deleted: delete page, update home and category
-				categoryID := ""
-				if catID, ok := event.Metadata["category_id"].(string); ok {
-					categoryID = catID
-				}
-				hs.Delete(fmt.Sprintf("/products/%s.html", event.ID))
-				hs.Build("home", "")
-				if categoryID != "" {
-					hs.Build("category", categoryID)
-				}
-			}
-
-		case "category":
-			switch event.Action {
-			case "updated":
-				// Category name changed: rebuild category page and all its products
-				hs.Build("category", event.ID)
-				for _, product := range getProductsByCategory(event.ID) {
-					hs.Build("product", product.ID)
-				}
-				hs.Build("home", "")
-			}
-
-		case "brand":
-			switch event.Action {
-			case "updated":
-				// Brand name changed: rebuild all products of this brand
-				for _, product := range getProductsByBrand(event.ID) {
-					hs.Build("product", product.ID)
-				}
-			}
-		}
-
-		return nil
-	})
-
-	// ========== BUILD ALL AT STARTUP ==========
+	// ========== BUILD ALL ==========
 
 	fmt.Println("Building all pages...")
 	if err := hs.BuildAll(ctx); err != nil {
 		log.Fatal(err)
 	}
 
-	// ========== START DEV MODE ==========
-
-	if devMode {
-		fmt.Println("Dev mode: watching for template changes...")
-		hs.StartDevMode(ctx, func() {
-			fmt.Println("Templates changed, rebuilding...")
-			hs.BuildAll(ctx)
-		})
-	}
-
-	// ========== START WORKERS ==========
-
-	hs.Start()
-
-	fmt.Println("\nStats:", hs.Stats())
-
-	// ========== HTTP SERVER ==========
-
-	mux := http.NewServeMux()
-
-	// API endpoints
-	handler := hotstatic.NewHTTPHandler(hs.HotStatic)
-	mux.Handle("/api/", handler.Router())
-
-	// Serve static files with caching
-	staticHandler := hotstatic.NewStaticHandlerWithCache("./dist", "404.html", []hotstatic.CacheRule{
-		{Pattern: `\.[a-f0-9]{8}\.(css|js)$`, MaxAge: 31536000, Immutable: true},
-		{Pattern: `\.(png|jpg|svg|webp|ico)$`, MaxAge: 86400},
-		{Pattern: `\.html$`, MaxAge: 0, MustRevalidate: true},
-	})
-	mux.Handle("/", staticHandler)
-
-	fmt.Println("\nServer running on http://localhost:8080")
-	fmt.Println("\nPages:")
-	fmt.Println("  http://localhost:8080/")
-	fmt.Println("  http://localhost:8080/products/1.html")
-	fmt.Println("  http://localhost:8080/categories/phones.html")
-	fmt.Println("\nAPI:")
-	fmt.Println("  POST /api/events - emit event")
-	fmt.Println("  POST /api/build  - build single page")
-	fmt.Println("  GET  /api/stats  - statistics")
-	fmt.Println("\nExample events:")
-	fmt.Println("  curl -X POST http://localhost:8080/api/events \\")
-	fmt.Println("       -H 'Content-Type: application/json' \\")
-	fmt.Println("       -d '{\"type\":\"product\",\"id\":\"1\",\"action\":\"updated\"}'")
-
-	// Graceful shutdown
-	server := &http.Server{
-		Addr:    ":8080",
-		Handler: mux,
-	}
-
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
-		}
-	}()
-
-	<-quit
-	fmt.Println("\nShutting down...")
-
-	hs.Stop()
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("server shutdown error: %v", err)
-	}
-
-	fmt.Println("Shutdown complete")
+	fmt.Println("\nDone! Generated files in ./dist/")
+	fmt.Println("  ./dist/index.html")
+	fmt.Println("  ./dist/products/1.html")
+	fmt.Println("  ./dist/products/2.html")
+	fmt.Println("  ./dist/products/3.html")
+	fmt.Println("  ./dist/categories/phones.html")
+	fmt.Println("  ./dist/categories/laptops.html")
 }
 
 // slogLogger adapts slog.Logger to hotstatic.Logger interface

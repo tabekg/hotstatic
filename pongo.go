@@ -3,7 +3,6 @@ package hotstatic
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,7 +10,6 @@ import (
 	"time"
 
 	"github.com/flosch/pongo2/v6"
-	"github.com/fsnotify/fsnotify"
 )
 
 // PongoBuilder implements Builder interface using pongo2 templates.
@@ -23,27 +21,21 @@ type PongoBuilder struct {
 	mu          sync.RWMutex
 }
 
-// PongoConfig for PongoBuilder.
-type PongoConfig struct {
-	TemplateDir string
-	OutputDir   string
-}
-
 // NewPongoBuilder creates a new pongo2 builder.
-func NewPongoBuilder(cfg PongoConfig) (*PongoBuilder, error) {
-	if cfg.TemplateDir == "" {
-		cfg.TemplateDir = "./templates"
+func NewPongoBuilder(templateDir, outputDir string) (*PongoBuilder, error) {
+	if templateDir == "" {
+		templateDir = "./templates"
 	}
-	if cfg.OutputDir == "" {
-		cfg.OutputDir = "./dist"
+	if outputDir == "" {
+		outputDir = "./dist"
 	}
 
-	loader := pongo2.MustNewLocalFileSystemLoader(cfg.TemplateDir)
+	loader := pongo2.MustNewLocalFileSystemLoader(templateDir)
 	templateSet := pongo2.NewSet("hotstatic", loader)
 
 	pb := &PongoBuilder{
-		templateDir: cfg.TemplateDir,
-		outputDir:   cfg.OutputDir,
+		templateDir: templateDir,
+		outputDir:   outputDir,
 		templateSet: templateSet,
 		globals:     make(map[string]any),
 	}
@@ -102,15 +94,6 @@ func (pb *PongoBuilder) Build(ctx context.Context, templateFile, outputPath stri
 	return nil
 }
 
-// Delete removes a file from output directory.
-func (pb *PongoBuilder) Delete(outputPath string) error {
-	fullPath := filepath.Join(pb.outputDir, outputPath)
-	if err := os.Remove(fullPath); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
-}
-
 // AddGlobal adds a global variable available in all templates.
 func (pb *PongoBuilder) AddGlobal(name string, value any) {
 	pb.mu.Lock()
@@ -132,16 +115,6 @@ func (pb *PongoBuilder) Reload() error {
 	pb.templateSet = pongo2.NewSet("hotstatic", loader)
 
 	return nil
-}
-
-// TemplateDir returns the template directory.
-func (pb *PongoBuilder) TemplateDir() string {
-	return pb.templateDir
-}
-
-// OutputDir returns the output directory.
-func (pb *PongoBuilder) OutputDir() string {
-	return pb.outputDir
 }
 
 func (pb *PongoBuilder) registerDefaultFilters() {
@@ -203,15 +176,12 @@ func (pb *PongoBuilder) registerDefaultFilters() {
 // PongoHotStatic is HotStatic with pongo2 support.
 type PongoHotStatic struct {
 	*HotStatic
-	builder *PongoBuilder
+	Builder *PongoBuilder
 }
 
 // NewWithPongo creates HotStatic with pongo2 support.
 func NewWithPongo(cfg Config) (*PongoHotStatic, error) {
-	builder, err := NewPongoBuilder(PongoConfig{
-		TemplateDir: cfg.TemplateDir,
-		OutputDir:   cfg.OutputDir,
-	})
+	builder, err := NewPongoBuilder(cfg.TemplateDir, cfg.OutputDir)
 	if err != nil {
 		return nil, err
 	}
@@ -221,117 +191,16 @@ func NewWithPongo(cfg Config) (*PongoHotStatic, error) {
 
 	return &PongoHotStatic{
 		HotStatic: hs,
-		builder:   builder,
+		Builder:   builder,
 	}, nil
-}
-
-// Builder returns the pongo2 builder.
-func (phs *PongoHotStatic) Builder() *PongoBuilder {
-	return phs.builder
 }
 
 // AddGlobal adds a global variable available in all templates.
 func (phs *PongoHotStatic) AddGlobal(name string, value any) {
-	phs.builder.AddGlobal(name, value)
+	phs.Builder.AddGlobal(name, value)
 }
 
 // AddFilter adds a custom template filter.
 func (phs *PongoHotStatic) AddFilter(name string, fn pongo2.FilterFunction) error {
-	return phs.builder.AddFilter(name, fn)
-}
-
-// StartDevMode starts file watcher for templates.
-// On template change, reloads templates and calls onChange callback.
-func (phs *PongoHotStatic) StartDevMode(ctx context.Context, onChange func()) error {
-	if !phs.config.DevMode {
-		return nil
-	}
-
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return fmt.Errorf("create watcher: %w", err)
-	}
-
-	// Watch template directory recursively
-	err = filepath.WalkDir(phs.builder.templateDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return watcher.Add(path)
-		}
-		return nil
-	})
-	if err != nil {
-		watcher.Close()
-		return fmt.Errorf("watch template dir: %w", err)
-	}
-
-	phs.config.Logger.Info("dev mode started",
-		"templates", phs.builder.templateDir,
-	)
-
-	go phs.watchLoop(ctx, watcher, onChange)
-
-	return nil
-}
-
-func (phs *PongoHotStatic) watchLoop(ctx context.Context, watcher *fsnotify.Watcher, onChange func()) {
-	defer watcher.Close()
-
-	var pending bool
-	var lastEvent time.Time
-	var mu sync.Mutex
-	debounceDelay := 100 * time.Millisecond
-
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-
-		case event, ok := <-watcher.Events:
-			if !ok {
-				return
-			}
-
-			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove) == 0 {
-				continue
-			}
-
-			mu.Lock()
-			pending = true
-			lastEvent = time.Now()
-			mu.Unlock()
-
-		case <-ticker.C:
-			mu.Lock()
-			if pending && time.Since(lastEvent) >= debounceDelay {
-				pending = false
-				mu.Unlock()
-
-				phs.config.Logger.Info("template changed, reloading")
-
-				if err := phs.builder.Reload(); err != nil {
-					phs.config.Logger.Error("reload templates failed",
-						"error", err.Error(),
-					)
-				} else if onChange != nil {
-					onChange()
-				}
-			} else {
-				mu.Unlock()
-			}
-
-		case err, ok := <-watcher.Errors:
-			if !ok {
-				return
-			}
-			phs.config.Logger.Error("watcher error",
-				"error", err.Error(),
-			)
-		}
-	}
+	return phs.Builder.AddFilter(name, fn)
 }
