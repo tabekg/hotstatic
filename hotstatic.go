@@ -3,190 +3,227 @@ package hotstatic
 import (
 	"context"
 	"fmt"
-	"html/template"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/tabekg/hotstatic/pkg/builder"
-	"github.com/tabekg/hotstatic/pkg/queue"
-	"github.com/tabekg/hotstatic/pkg/registry"
-	"github.com/tabekg/hotstatic/pkg/worker"
 )
 
 // HotStatic is the main framework instance.
 type HotStatic struct {
-	config      Config
-	registry    *registry.Registry
-	builder     *builder.Builder
-	queue       *queue.Queue
-	pool        *worker.Pool
-	pageConfigs map[string]*PageConfig
-	logger      *slog.Logger
-	mu          sync.RWMutex
-	ctx         context.Context
-	cancel      context.CancelFunc
-	started     bool
-	startTime   time.Time
+	config       Config
+	templates    map[string]*TemplateDef
+	eventHandler EventHandler
+	builder      Builder
+
+	// Queue and workers
+	queue     chan BuildJob
+	pending   map[string]time.Time // for debounce: key -> last queued time
+	pendingMu sync.Mutex
+	wg        sync.WaitGroup
+	ctx       context.Context
+	cancel    context.CancelFunc
+	started   bool
+	startTime time.Time
 
 	// Metrics
-	eventsProcessed int64
 	pagesBuilt      int64
 	pagesFailed     int64
+	eventsProcessed int64
+
+	mu sync.RWMutex
 }
 
-// BuildHandlerFunc is called for each page rebuild job.
-type BuildHandlerFunc func(ctx context.Context, job worker.Job) error
-
-// Config for HotStatic.
-type Config struct {
-	// Redis connection string
-	Redis string
-
-	// RedisPassword optional
-	RedisPassword string
-
-	// RedisDB number
-	RedisDB int
-
-	// RedisPrefix for key namespacing
-	RedisPrefix string
-
-	// TemplateDir for templates
-	TemplateDir string
-
-	// OutputDir for generated files
-	OutputDir string
-
-	// NotFoundPage is the path to custom 404 page relative to OutputDir (e.g., "404.html").
-	// Used by StaticHandler when serving files.
-	NotFoundPage string
-
-	// CacheRules defines caching behavior for static files.
-	// Rules are checked in order, first match wins.
-	CacheRules []CacheRule
-
-	// StaticPagesDir is the directory containing static page templates (relative to TemplateDir).
-	// All templates in this directory are automatically built as static pages.
-	// Example: "pages" → templates/pages/*.jinja2 → /about.html, /contact.html, etc.
-	// Default: "" (disabled)
-	StaticPagesDir string
-
-	// DevMode enables file watching and auto-rebuild for static pages.
-	DevMode bool
-
-	// StaticDir is the directory to watch for static file changes in dev mode.
-	// Example: "./src" or "./assets"
-	StaticDir string
-
-	// OnTemplateChange is called when a template file changes.
-	// Called before automatic rebuild.
-	OnTemplateChange func(path string)
-
-	// OnStaticChange is called when a file in StaticDir changes.
-	// Use this to run build tools (e.g., "yarn build").
-	OnStaticChange func(path string)
-
-	// Workers count for parallel building
-	Workers int
-
-	// QueueSize buffer size
-	QueueSize int
-
-	// Logger instance
-	Logger *slog.Logger
-
-	// FuncMap custom template functions
-	FuncMap template.FuncMap
-
-	// BuildHandler custom handler for page rebuilds (optional).
-	// If not set, the default handler is used.
-	BuildHandler BuildHandlerFunc
+// Builder interface for template rendering.
+type Builder interface {
+	Build(ctx context.Context, templateFile, outputPath string, data map[string]any) error
+	Delete(outputPath string) error
 }
 
 // New creates a new HotStatic instance.
-func New(cfg Config) (*HotStatic, error) {
+func New(cfg Config) *HotStatic {
 	if cfg.Workers <= 0 {
 		cfg.Workers = 4
 	}
-	if cfg.QueueSize <= 0 {
-		cfg.QueueSize = 10000
-	}
-	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
+	if cfg.Debounce <= 0 {
+		cfg.Debounce = time.Second
 	}
 	if cfg.OutputDir == "" {
 		cfg.OutputDir = "./dist"
 	}
-
-	// Initialize registry
-	reg, err := registry.New(registry.Config{
-		RedisAddr:     cfg.Redis,
-		RedisPassword: cfg.RedisPassword,
-		RedisDB:       cfg.RedisDB,
-		Prefix:        cfg.RedisPrefix,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("init registry: %w", err)
-	}
-
-	// Initialize builder
-	bld, err := builder.New(builder.Config{
-		TemplateDir: cfg.TemplateDir,
-		OutputDir:   cfg.OutputDir,
-		FuncMap:     cfg.FuncMap,
-	})
-	if err != nil {
-		reg.Close()
-		return nil, fmt.Errorf("init builder: %w", err)
+	if cfg.Logger == nil {
+		cfg.Logger = &slogAdapter{slog.Default()}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	hs := &HotStatic{
-		config:      cfg,
-		registry:    reg,
-		builder:     bld,
-		queue:       queue.New(),
-		pageConfigs: make(map[string]*PageConfig),
-		logger:      cfg.Logger,
-		ctx:         ctx,
-		cancel:      cancel,
+	return &HotStatic{
+		config:    cfg,
+		templates: make(map[string]*TemplateDef),
+		queue:     make(chan BuildJob, 10000),
+		pending:   make(map[string]time.Time),
+		ctx:       ctx,
+		cancel:    cancel,
 	}
-
-	// Use custom handler if provided, otherwise use default
-	handler := hs.buildHandler
-	if cfg.BuildHandler != nil {
-		handler = cfg.BuildHandler
-	}
-
-	// Initialize worker pool
-	hs.pool = worker.NewPool(worker.Config{
-		NumWorkers: cfg.Workers,
-		QueueSize:  cfg.QueueSize,
-		Logger:     cfg.Logger,
-	}, handler)
-
-	return hs, nil
 }
 
-// RegisterPage registers a page configuration.
-func (hs *HotStatic) RegisterPage(name string, cfg PageConfig) {
+// DefineTemplate registers a template definition.
+func (hs *HotStatic) DefineTemplate(name string, def TemplateDef) {
 	hs.mu.Lock()
 	defer hs.mu.Unlock()
-
-	cfg.Name = name
-	hs.pageConfigs[name] = &cfg
+	hs.templates[name] = &def
 }
 
-// RegisterTemplate adds a template from string.
-func (hs *HotStatic) RegisterTemplate(name, content string) error {
-	return hs.builder.RegisterTemplate(name, content)
+// OnEvent sets the event handler.
+func (hs *HotStatic) OnEvent(handler EventHandler) {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	hs.eventHandler = handler
 }
 
-// Start begins processing events.
+// SetBuilder sets the template builder.
+func (hs *HotStatic) SetBuilder(builder Builder) {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	hs.builder = builder
+}
+
+// Build queues a page for building.
+func (hs *HotStatic) Build(template string, id string) {
+	hs.queueBuild(BuildJob{
+		Template:  template,
+		ID:        id,
+		CreatedAt: time.Now(),
+	})
+}
+
+// BuildWithPriority queues a page for building with priority.
+func (hs *HotStatic) BuildWithPriority(template string, id string, priority int) {
+	hs.queueBuild(BuildJob{
+		Template:  template,
+		ID:        id,
+		Priority:  priority,
+		CreatedAt: time.Now(),
+	})
+}
+
+// Delete removes a generated page.
+func (hs *HotStatic) Delete(template string, id string) error {
+	hs.mu.RLock()
+	def, ok := hs.templates[template]
+	hs.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("template not found: %s", template)
+	}
+
+	outputPath := hs.buildOutputPath(def.Output, id)
+	fullPath := filepath.Join(hs.config.OutputDir, outputPath)
+
+	if err := os.Remove(fullPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	hs.config.Logger.Info("deleted page",
+		"template", template,
+		"id", id,
+		"output", outputPath,
+	)
+
+	return nil
+}
+
+// BuildAll builds all pages for all templates.
+func (hs *HotStatic) BuildAll(ctx context.Context) error {
+	start := time.Now()
+
+	hs.mu.RLock()
+	templates := make(map[string]*TemplateDef)
+	for k, v := range hs.templates {
+		templates[k] = v
+	}
+	hs.mu.RUnlock()
+
+	var totalPages int
+
+	for name, def := range templates {
+		if def.LoadAll == nil {
+			continue
+		}
+
+		ids, err := def.LoadAll(ctx)
+		if err != nil {
+			return fmt.Errorf("LoadAll for %s: %w", name, err)
+		}
+
+		hs.config.Logger.Info("building template",
+			"template", name,
+			"count", len(ids),
+		)
+
+		for _, id := range ids {
+			if err := hs.buildPage(ctx, name, id); err != nil {
+				hs.config.Logger.Error("build failed",
+					"template", name,
+					"id", id,
+					"error", err.Error(),
+				)
+				atomic.AddInt64(&hs.pagesFailed, 1)
+			} else {
+				atomic.AddInt64(&hs.pagesBuilt, 1)
+				totalPages++
+			}
+		}
+	}
+
+	hs.config.Logger.Info("build complete",
+		"pages", totalPages,
+		"duration", time.Since(start),
+	)
+
+	return nil
+}
+
+// Emit sends an event to be processed by the event handler.
+func (hs *HotStatic) Emit(eventType, id, action string) error {
+	return hs.EmitEvent(Event{
+		Type:      eventType,
+		ID:        id,
+		Action:    action,
+		Timestamp: time.Now(),
+	})
+}
+
+// EmitEvent sends an event to be processed by the event handler.
+func (hs *HotStatic) EmitEvent(event Event) error {
+	atomic.AddInt64(&hs.eventsProcessed, 1)
+
+	hs.mu.RLock()
+	handler := hs.eventHandler
+	hs.mu.RUnlock()
+
+	if handler == nil {
+		hs.config.Logger.Warn("no event handler set, ignoring event",
+			"type", event.Type,
+			"id", event.ID,
+			"action", event.Action,
+		)
+		return nil
+	}
+
+	hs.config.Logger.Debug("event received",
+		"type", event.Type,
+		"id", event.ID,
+		"action", event.Action,
+	)
+
+	return handler(hs.ctx, event)
+}
+
+// Start begins processing the build queue with workers.
 func (hs *HotStatic) Start() {
 	hs.mu.Lock()
 	if hs.started {
@@ -197,273 +234,195 @@ func (hs *HotStatic) Start() {
 	hs.startTime = time.Now()
 	hs.mu.Unlock()
 
-	hs.pool.Start()
+	// Start workers
+	for i := 0; i < hs.config.Workers; i++ {
+		hs.wg.Add(1)
+		go hs.worker(i)
+	}
 
-	// Start queue processor
-	go hs.processQueue()
-
-	// Start results processor
-	go hs.processResults()
-
-	hs.logger.Info("HotStatic started",
-		slog.Int("workers", hs.config.Workers),
-		slog.String("output", hs.config.OutputDir),
+	hs.config.Logger.Info("started",
+		"workers", hs.config.Workers,
+		"debounce", hs.config.Debounce,
 	)
 }
 
-// Stop shuts down HotStatic.
-func (hs *HotStatic) Stop() error {
+// Stop gracefully shuts down HotStatic.
+func (hs *HotStatic) Stop() {
 	hs.cancel()
-	hs.queue.Close()
-	hs.pool.Stop()
-	return hs.registry.Close()
-}
+	close(hs.queue)
+	hs.wg.Wait()
 
-// Emit triggers a rebuild for all pages that depend on the key.
-func (hs *HotStatic) Emit(key, action string) error {
-	return hs.EmitEvent(Event{
-		Type:      strings.Split(key, ":")[0],
-		ID:        strings.TrimPrefix(key, strings.Split(key, ":")[0]+":"),
-		Action:    action,
-		Timestamp: time.Now(),
-	})
-}
-
-// EmitWithPayload triggers a rebuild with entity data.
-// The payload is passed directly to the template for rendering.
-func (hs *HotStatic) EmitWithPayload(key, action string, payload map[string]any) error {
-	return hs.EmitEvent(Event{
-		Type:      strings.Split(key, ":")[0],
-		ID:        strings.TrimPrefix(key, strings.Split(key, ":")[0]+":"),
-		Action:    action,
-		Payload:   payload,
-		Timestamp: time.Now(),
-	})
-}
-
-// EmitEvent triggers rebuilds for an event.
-func (hs *HotStatic) EmitEvent(event Event) error {
-	atomic.AddInt64(&hs.eventsProcessed, 1)
-
-	key := event.Key()
-	pages, err := hs.registry.GetDependents(hs.ctx, key)
-	if err != nil {
-		return fmt.Errorf("get dependents for %s: %w", key, err)
-	}
-
-	hs.logger.Debug("event received",
-		slog.String("key", key),
-		slog.String("action", event.Action),
-		slog.Int("dependents", len(pages)),
-		slog.Bool("has_payload", event.HasPayload()),
-	)
-
-	for _, pagePath := range pages {
-		hs.queue.Push(queue.Item{
-			Path:       pagePath,
-			Priority:   event.Priority,
-			TriggerKey: key,
-			Payload:    event.Payload,
-		})
-	}
-
-	return nil
-}
-
-// EmitMulti triggers rebuilds for multiple keys.
-func (hs *HotStatic) EmitMulti(keys []string, action string) error {
-	pages, err := hs.registry.GetDependentsMulti(hs.ctx, keys)
-	if err != nil {
-		return err
-	}
-
-	for _, pagePath := range pages {
-		hs.queue.Push(queue.Item{
-			Path:     pagePath,
-			Priority: 0,
-		})
-	}
-
-	return nil
-}
-
-// Build immediately builds a page by path with the given payload.
-func (hs *HotStatic) Build(ctx context.Context, pagePath string, payload map[string]any) (*BuildResult, error) {
-	meta, err := hs.registry.GetPage(ctx, pagePath)
-	if err != nil {
-		return nil, err
-	}
-	if meta == nil {
-		return nil, fmt.Errorf("page not found: %s", pagePath)
-	}
-
-	return hs.buildPageWithPayload(ctx, meta, payload)
-}
-
-// ListPages returns all registered page paths.
-func (hs *HotStatic) ListPages(ctx context.Context) ([]string, error) {
-	return hs.registry.ListPages(ctx)
-}
-
-// AddDependencies registers a page with its dependencies.
-func (hs *HotStatic) AddDependencies(ctx context.Context, page Page) error {
-	return hs.registry.AddDependencies(ctx, registry.PageMeta{
-		Path:         page.Path,
-		Template:     page.Template,
-		Params:       page.Params,
-		Dependencies: page.Dependencies,
-		LastBuilt:    page.LastBuilt,
-		ContentHash:  page.ContentHash,
-	})
-}
-
-// RemoveDependencies removes a page and its dependencies.
-func (hs *HotStatic) RemoveDependencies(ctx context.Context, pagePath string) error {
-	return hs.registry.RemoveDependencies(ctx, pagePath)
-}
-
-// GeneratePage creates a single page with the given data and dependencies.
-func (hs *HotStatic) GeneratePage(ctx context.Context, page Page, data map[string]any) error {
-	// Register page dependencies
-	err := hs.AddDependencies(ctx, page)
-	if err != nil {
-		return fmt.Errorf("add dependencies %s: %w", page.Path, err)
-	}
-
-	// Build immediately
-	result, err := hs.builder.Build(ctx, page.Template, page.Path, data)
-	if err != nil {
-		return fmt.Errorf("build %s: %w", page.Path, err)
-	}
-
-	// Update registry
-	hs.registry.UpdateLastBuilt(ctx, page.Path, time.Now(), result.ContentHash)
-	return nil
+	hs.config.Logger.Info("stopped")
 }
 
 // Stats returns current statistics.
 func (hs *HotStatic) Stats() Stats {
-	poolStats := hs.pool.Stats()
-	regStats, _ := hs.registry.Stats(hs.ctx)
+	hs.mu.RLock()
+	templatesCount := len(hs.templates)
+	hs.mu.RUnlock()
+
+	var uptime time.Duration
+	if !hs.startTime.IsZero() {
+		uptime = time.Since(hs.startTime)
+	}
 
 	return Stats{
-		PagesTotal:      regStats["pages"],
+		TemplatesCount:  templatesCount,
 		PagesBuilt:      atomic.LoadInt64(&hs.pagesBuilt),
 		PagesFailed:     atomic.LoadInt64(&hs.pagesFailed),
 		EventsProcessed: atomic.LoadInt64(&hs.eventsProcessed),
-		QueueLength:     int64(hs.queue.Len()),
-		WorkersActive:   poolStats.ActiveCount,
-		Uptime:          time.Since(hs.startTime),
+		QueueLength:     len(hs.queue),
+		WorkersActive:   hs.config.Workers,
+		Uptime:          uptime,
 	}
 }
 
-// Registry returns the underlying registry.
-func (hs *HotStatic) Registry() *registry.Registry {
-	return hs.registry
+// GetTemplate returns a template definition by name.
+func (hs *HotStatic) GetTemplate(name string) (*TemplateDef, bool) {
+	hs.mu.RLock()
+	defer hs.mu.RUnlock()
+	def, ok := hs.templates[name]
+	return def, ok
 }
 
-// Builder returns the underlying builder.
-func (hs *HotStatic) Builder() *builder.Builder {
-	return hs.builder
+// queueBuild adds a job to the queue with debouncing.
+func (hs *HotStatic) queueBuild(job BuildJob) {
+	key := job.Key()
+
+	hs.pendingMu.Lock()
+	lastQueued, exists := hs.pending[key]
+	now := time.Now()
+
+	// Debounce: skip if same page was queued recently
+	if exists && now.Sub(lastQueued) < hs.config.Debounce {
+		hs.pendingMu.Unlock()
+		hs.config.Logger.Debug("debounced",
+			"template", job.Template,
+			"id", job.ID,
+		)
+		return
+	}
+
+	hs.pending[key] = now
+	hs.pendingMu.Unlock()
+
+	// Non-blocking send to queue
+	select {
+	case hs.queue <- job:
+	default:
+		hs.config.Logger.Warn("queue full, dropping job",
+			"template", job.Template,
+			"id", job.ID,
+		)
+	}
 }
 
-func (hs *HotStatic) processQueue() {
-	for {
+// worker processes jobs from the queue.
+func (hs *HotStatic) worker(id int) {
+	defer hs.wg.Done()
+
+	for job := range hs.queue {
 		select {
 		case <-hs.ctx.Done():
 			return
 		default:
-			item := hs.queue.PopWait(hs.ctx)
-			if item == nil {
-				continue
-			}
-
-			hs.pool.Submit(worker.Job{
-				ID:         item.Path,
-				Path:       item.Path,
-				Priority:   item.Priority,
-				TriggerKey: item.TriggerKey,
-				Payload:    item.Payload,
-			})
 		}
-	}
-}
 
-func (hs *HotStatic) processResults() {
-	for result := range hs.pool.Results() {
-		if result.Success {
-			atomic.AddInt64(&hs.pagesBuilt, 1)
-		} else {
+		if err := hs.buildPage(hs.ctx, job.Template, job.ID); err != nil {
+			hs.config.Logger.Error("build failed",
+				"worker", id,
+				"template", job.Template,
+				"id", job.ID,
+				"error", err.Error(),
+			)
 			atomic.AddInt64(&hs.pagesFailed, 1)
+		} else {
+			atomic.AddInt64(&hs.pagesBuilt, 1)
 		}
+
+		// Clear from pending after build
+		hs.pendingMu.Lock()
+		delete(hs.pending, job.Key())
+		hs.pendingMu.Unlock()
 	}
 }
 
-func (hs *HotStatic) buildHandler(ctx context.Context, job worker.Job) error {
-	if len(job.Payload) == 0 {
-		hs.logger.Warn("skipping rebuild - no payload provided",
-			slog.String("path", job.Path),
+// buildPage builds a single page.
+func (hs *HotStatic) buildPage(ctx context.Context, template string, id string) error {
+	start := time.Now()
+
+	hs.mu.RLock()
+	def, ok := hs.templates[template]
+	builder := hs.builder
+	hs.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("template not found: %s", template)
+	}
+
+	if builder == nil {
+		return fmt.Errorf("no builder set")
+	}
+
+	if def.Load == nil {
+		return fmt.Errorf("template %s has no Load function", template)
+	}
+
+	// Load data
+	data, err := def.Load(ctx, id)
+	if err != nil {
+		return fmt.Errorf("load data: %w", err)
+	}
+
+	if data == nil {
+		// nil means skip (e.g., deleted or inactive entity)
+		hs.config.Logger.Debug("skipped (no data)",
+			"template", template,
+			"id", id,
 		)
 		return nil
 	}
 
-	meta, err := hs.registry.GetPage(ctx, job.Path)
-	if err != nil {
-		return err
+	// Build output path
+	outputPath := hs.buildOutputPath(def.Output, id)
+
+	// Build page
+	if err := builder.Build(ctx, def.File, outputPath, data); err != nil {
+		return fmt.Errorf("build: %w", err)
 	}
-	if meta == nil {
-		return fmt.Errorf("page not found: %s", job.Path)
-	}
 
-	_, err = hs.buildPageWithPayload(ctx, meta, job.Payload)
-	return err
-}
-
-func (hs *HotStatic) buildPageWithPayload(ctx context.Context, meta *registry.PageMeta, payload map[string]any) (*BuildResult, error) {
-	start := time.Now()
-
-	hs.logger.Debug("building page",
-		slog.String("path", meta.Path),
-		slog.Int("payload_keys", len(payload)),
+	hs.config.Logger.Debug("built page",
+		"template", template,
+		"id", id,
+		"output", outputPath,
+		"duration", time.Since(start),
 	)
 
-	// Build
-	result, err := hs.builder.Build(ctx, meta.Template, meta.Path, payload)
-	if err != nil {
-		return &BuildResult{
-			Page:      Page{Path: meta.Path},
-			Success:   false,
-			Error:     err.Error(),
-			Duration:  time.Since(start),
-			Timestamp: time.Now(),
-		}, err
-	}
-
-	// Update registry
-	hs.registry.UpdateLastBuilt(ctx, meta.Path, time.Now(), result.ContentHash)
-
-	return &BuildResult{
-		Page: Page{
-			Path:         meta.Path,
-			Template:     meta.Template,
-			Dependencies: meta.Dependencies,
-			Params:       meta.Params,
-			LastBuilt:    time.Now(),
-			ContentHash:  result.ContentHash,
-		},
-		Success:   true,
-		Duration:  time.Since(start),
-		Changed:   result.Changed,
-		Timestamp: time.Now(),
-	}, nil
+	return nil
 }
 
-// Helper functions
+// buildOutputPath replaces {id} placeholder in output pattern.
+func (hs *HotStatic) buildOutputPath(pattern string, id string) string {
+	return strings.ReplaceAll(pattern, "{id}", id)
+}
 
-func buildPath(pattern string, params map[string]string) string {
-	result := pattern
-	for key, value := range params {
-		result = strings.ReplaceAll(result, "{"+key+"}", value)
-	}
-	return result
+// slogAdapter wraps slog.Logger to implement Logger interface.
+type slogAdapter struct {
+	*slog.Logger
+}
+
+func (s *slogAdapter) Debug(msg string, args ...any) {
+	s.Logger.Debug(msg, args...)
+}
+
+func (s *slogAdapter) Info(msg string, args ...any) {
+	s.Logger.Info(msg, args...)
+}
+
+func (s *slogAdapter) Warn(msg string, args ...any) {
+	s.Logger.Warn(msg, args...)
+}
+
+func (s *slogAdapter) Error(msg string, args ...any) {
+	s.Logger.Error(msg, args...)
 }

@@ -14,263 +14,376 @@ import (
 	"github.com/tabekg/hotstatic"
 )
 
-// Product data
+// ========== DATA MODELS ==========
+
 type Product struct {
 	ID           string
 	Name         string
 	Price        float64
 	Description  string
-	BrandID      string
-	BrandName    string
 	CategoryID   string
 	CategoryName string
+	BrandID      string
+	BrandName    string
 	Features     []string
 	InStock      bool
+	IsFeatured   bool
 }
 
-// Category data
 type Category struct {
-	ID    string
-	Name  string
-	Count int
+	ID   string
+	Name string
 }
 
-// Mock database
-var products = map[string]Product{
+type Brand struct {
+	ID   string
+	Name string
+}
+
+// ========== MOCK DATABASE ==========
+
+var products = map[string]*Product{
 	"1": {
 		ID:           "1",
 		Name:         "iPhone 15 Pro",
 		Price:        999.00,
-		Description:  "The most powerful iPhone ever. Featuring the A17 Pro chip, titanium design, and an advanced camera system that transforms mobile photography.",
-		BrandID:      "apple",
-		BrandName:    "Apple",
+		Description:  "The most powerful iPhone ever.",
 		CategoryID:   "phones",
 		CategoryName: "Smartphones",
-		Features:     []string{"A17 Pro chip", "Titanium design", "48MP camera system", "USB-C", "Action button"},
+		BrandID:      "apple",
+		BrandName:    "Apple",
+		Features:     []string{"A17 Pro chip", "Titanium design", "48MP camera"},
 		InStock:      true,
+		IsFeatured:   true,
 	},
 	"2": {
 		ID:           "2",
 		Name:         "Galaxy S24 Ultra",
 		Price:        1199.00,
-		Description:  "The ultimate Galaxy experience with built-in S Pen, AI-powered features, and a stunning 200MP camera.",
-		BrandID:      "samsung",
-		BrandName:    "Samsung",
+		Description:  "The ultimate Galaxy experience.",
 		CategoryID:   "phones",
 		CategoryName: "Smartphones",
-		Features:     []string{"Snapdragon 8 Gen 3", "S Pen included", "200MP camera", "Titanium frame", "Galaxy AI"},
+		BrandID:      "samsung",
+		BrandName:    "Samsung",
+		Features:     []string{"Snapdragon 8 Gen 3", "S Pen", "200MP camera"},
 		InStock:      true,
+		IsFeatured:   true,
 	},
 	"3": {
 		ID:           "3",
 		Name:         "MacBook Pro 16\"",
 		Price:        2499.00,
-		Description:  "Supercharged by M3 Pro or M3 Max chip. The most advanced Mac laptops for demanding workflows.",
-		BrandID:      "apple",
-		BrandName:    "Apple",
+		Description:  "Supercharged by M3 Pro chip.",
 		CategoryID:   "laptops",
 		CategoryName: "Laptops",
-		Features:     []string{"M3 Pro/Max chip", "Up to 22hr battery", "Liquid Retina XDR", "MagSafe 3", "HDMI & SD card"},
+		BrandID:      "apple",
+		BrandName:    "Apple",
+		Features:     []string{"M3 Pro chip", "22hr battery", "Liquid Retina XDR"},
 		InStock:      true,
+		IsFeatured:   true,
 	},
 	"4": {
 		ID:           "4",
 		Name:         "ThinkPad X1 Carbon",
 		Price:        1849.00,
-		Description:  "Ultralight business laptop with legendary ThinkPad reliability, security features, and all-day battery life.",
-		BrandID:      "lenovo",
-		BrandName:    "Lenovo",
+		Description:  "Ultralight business laptop.",
 		CategoryID:   "laptops",
 		CategoryName: "Laptops",
-		Features:     []string{"Intel Core Ultra", "Carbon fiber chassis", "ThinkShield security", "2.48 lbs", "Rapid Charge"},
+		BrandID:      "lenovo",
+		BrandName:    "Lenovo",
+		Features:     []string{"Intel Core Ultra", "Carbon fiber", "2.48 lbs"},
 		InStock:      false,
-	},
-	"5": {
-		ID:           "5",
-		Name:         "Pixel 8 Pro",
-		Price:        999.00,
-		Description:  "Google's most advanced phone yet with the best of Google AI, an incredible camera, and seven years of updates.",
-		BrandID:      "google",
-		BrandName:    "Google",
-		CategoryID:   "phones",
-		CategoryName: "Smartphones",
-		Features:     []string{"Tensor G3", "Pro cameras", "7 years updates", "Temperature sensor", "Magic Eraser"},
-		InStock:      true,
+		IsFeatured:   false,
 	},
 }
 
-var categories = map[string]Category{
-	"phones":  {ID: "phones", Name: "Smartphones", Count: 0},
-	"laptops": {ID: "laptops", Name: "Laptops", Count: 0},
+var categories = map[string]*Category{
+	"phones":  {ID: "phones", Name: "Smartphones"},
+	"laptops": {ID: "laptops", Name: "Laptops"},
 }
 
-func init() {
-	// Count products per category
+var brands = map[string]*Brand{
+	"apple":   {ID: "apple", Name: "Apple"},
+	"samsung": {ID: "samsung", Name: "Samsung"},
+	"lenovo":  {ID: "lenovo", Name: "Lenovo"},
+}
+
+// ========== DATA LOADER FUNCTIONS ==========
+
+func getProduct(id string) *Product {
+	return products[id]
+}
+
+func getAllProductIDs() []string {
+	ids := make([]string, 0, len(products))
+	for id := range products {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func getProductsByCategory(categoryID string) []*Product {
+	var result []*Product
 	for _, p := range products {
-		if cat, ok := categories[p.CategoryID]; ok {
-			cat.Count++
-			categories[p.CategoryID] = cat
+		if p.CategoryID == categoryID {
+			result = append(result, p)
 		}
 	}
+	return result
 }
+
+func getProductsByBrand(brandID string) []*Product {
+	var result []*Product
+	for _, p := range products {
+		if p.BrandID == brandID {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+func getFeaturedProducts() []*Product {
+	var result []*Product
+	for _, p := range products {
+		if p.IsFeatured && p.InStock {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+func getCategory(id string) *Category {
+	return categories[id]
+}
+
+func getAllCategoryIDs() []string {
+	ids := make([]string, 0, len(categories))
+	for id := range categories {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func getAllCategories() []*Category {
+	result := make([]*Category, 0, len(categories))
+	for _, c := range categories {
+		result = append(result, c)
+	}
+	return result
+}
+
+func getBrand(id string) *Brand {
+	return brands[id]
+}
+
+// ========== MAIN ==========
 
 func main() {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	// Check dev mode
-	devMode := os.Getenv("MODE") == "dev" || os.Getenv("MODE") == "development"
+	devMode := os.Getenv("MODE") == "dev"
 
-	// Initialize HotStatic with pongo2 (Django-like templates)
+	// Initialize HotStatic with pongo2
 	hs, err := hotstatic.NewWithPongo(hotstatic.Config{
-		Redis:        "localhost:6379",
-		TemplateDir:  "./templates",
-		OutputDir:    "./dist",
-		NotFoundPage: "404.html",
-		DevMode:      devMode,
-		CacheRules: []hotstatic.CacheRule{
-			{Pattern: `\.[a-f0-9]{8}\.(css|js)$`, MaxAge: 31536000, Immutable: true},
-			{Pattern: `\.(png|jpg|svg|webp|ico)$`, MaxAge: 86400},
-			{Pattern: `\.html$`, MaxAge: 0, MustRevalidate: true},
-		},
-		Workers: 4,
-		Logger:  logger,
+		TemplateDir: "./templates",
+		OutputDir:   "./dist",
+		Workers:     4,
+		Debounce:    time.Second,
+		DevMode:     devMode,
+		Logger:      &slogLogger{logger},
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer hs.Stop()
 
-	// Define how to build all pages
-	hs.SetBuilder(func(ctx context.Context, b *hotstatic.PageBuilder) error {
-		// Static pages (no data needed)
-		b.Page("pages/404.jinja2", "/404.html", nil)
+	// ========== DEFINE TEMPLATES ==========
 
-		// Home page - depends on featured products
-		featuredProducts := getFeaturedProducts()
-		homeDeps := make([]string, len(featuredProducts))
-		for i, p := range featuredProducts {
-			homeDeps[i] = "product:" + p.ID
-		}
-		b.Page("pages/home.jinja2", "/index.html", map[string]any{
-			"featured_products": featuredProducts,
-			"categories":        getCategories(),
-			"active_nav":        "home",
-		}).DependsOn(homeDeps...)
+	// Product pages
+	hs.DefineTemplate("product", hotstatic.TemplateDef{
+		File:   "pages/product.jinja2",
+		Output: "/products/{id}.html",
 
-		// Product pages
-		for id, product := range products {
-			b.Page("pages/product.jinja2", "/products/"+id+".html", map[string]any{
-				"product":    product,
-				"active_nav": product.CategoryID,
+		Load: func(ctx context.Context, id string) (map[string]any, error) {
+			product := getProduct(id)
+			if product == nil || !product.InStock {
+				return nil, nil // skip inactive products
+			}
+
+			return map[string]any{
+				"product":  product,
+				"category": getCategory(product.CategoryID),
+				"brand":    getBrand(product.BrandID),
 				"breadcrumb": []map[string]string{
 					{"label": "Home", "url": "/"},
 					{"label": product.CategoryName, "url": "/categories/" + product.CategoryID + ".html"},
 					{"label": product.Name, "url": ""},
 				},
-			}).DependsOn("product:"+product.ID, "brand:"+product.BrandID)
-		}
+			}, nil
+		},
 
-		// Category pages
-		for id, category := range categories {
-			categoryProducts := getProductsByCategory(id)
-			b.Page("pages/category.jinja2", "/categories/"+id+".html", map[string]any{
-				"category":   category,
-				"products":   categoryProducts,
-				"active_nav": id,
+		LoadAll: func(ctx context.Context) ([]string, error) {
+			return getAllProductIDs(), nil
+		},
+	})
+
+	// Category pages
+	hs.DefineTemplate("category", hotstatic.TemplateDef{
+		File:   "pages/category.jinja2",
+		Output: "/categories/{id}.html",
+
+		Load: func(ctx context.Context, id string) (map[string]any, error) {
+			category := getCategory(id)
+			if category == nil {
+				return nil, nil
+			}
+
+			return map[string]any{
+				"category": category,
+				"products": getProductsByCategory(id),
 				"breadcrumb": []map[string]string{
 					{"label": "Home", "url": "/"},
 					{"label": category.Name, "url": ""},
 				},
-			}).DependsOn("category:" + id)
+			}, nil
+		},
+
+		LoadAll: func(ctx context.Context) ([]string, error) {
+			return getAllCategoryIDs(), nil
+		},
+	})
+
+	// Home page
+	hs.DefineTemplate("home", hotstatic.TemplateDef{
+		File:   "pages/home.jinja2",
+		Output: "/index.html",
+
+		Load: func(ctx context.Context, id string) (map[string]any, error) {
+			return map[string]any{
+				"featured":   getFeaturedProducts(),
+				"categories": getAllCategories(),
+			}, nil
+		},
+
+		LoadAll: func(ctx context.Context) ([]string, error) {
+			return []string{""}, nil // single home page, empty id
+		},
+	})
+
+	// 404 page
+	hs.DefineTemplate("404", hotstatic.TemplateDef{
+		File:   "pages/404.jinja2",
+		Output: "/404.html",
+
+		Load: func(ctx context.Context, id string) (map[string]any, error) {
+			return map[string]any{}, nil
+		},
+
+		LoadAll: func(ctx context.Context) ([]string, error) {
+			return []string{""}, nil
+		},
+	})
+
+	// ========== EVENT HANDLER ==========
+
+	hs.OnEvent(func(ctx context.Context, event hotstatic.Event) error {
+		switch event.Type {
+		case "product":
+			switch event.Action {
+			case "created":
+				// New product: build product page, update home and category
+				hs.Build("product", event.ID)
+				hs.Build("home", "")
+				if product := getProduct(event.ID); product != nil {
+					hs.Build("category", product.CategoryID)
+				}
+
+			case "updated":
+				// Product updated: rebuild product page
+				hs.Build("product", event.ID)
+				// Optionally update category/home if price or featured status changed
+				if product := getProduct(event.ID); product != nil {
+					hs.Build("category", product.CategoryID)
+					if product.IsFeatured {
+						hs.Build("home", "")
+					}
+				}
+
+			case "deleted":
+				// Product deleted: delete page, update home and category
+				categoryID := ""
+				if catID, ok := event.Metadata["category_id"].(string); ok {
+					categoryID = catID
+				}
+				hs.Delete("product", event.ID)
+				hs.Build("home", "")
+				if categoryID != "" {
+					hs.Build("category", categoryID)
+				}
+			}
+
+		case "category":
+			switch event.Action {
+			case "updated":
+				// Category name changed: rebuild category page and all its products
+				hs.Build("category", event.ID)
+				for _, product := range getProductsByCategory(event.ID) {
+					hs.Build("product", product.ID)
+				}
+				hs.Build("home", "")
+			}
+
+		case "brand":
+			switch event.Action {
+			case "updated":
+				// Brand name changed: rebuild all products of this brand
+				for _, product := range getProductsByBrand(event.ID) {
+					hs.Build("product", product.ID)
+				}
+			}
 		}
 
 		return nil
 	})
 
-	// Set up resolvers for event-driven rebuilds
-	// When an event comes in, the resolver fetches fresh data and returns PageData
-	hs.SetResolver("product", func(ctx context.Context, event hotstatic.Event) (*hotstatic.PageData, error) {
-		product, ok := products[event.ID]
-		if !ok {
-			// Product deleted or not found - return nil to skip
-			return nil, nil
-		}
+	// ========== BUILD ALL AT STARTUP ==========
 
-		return &hotstatic.PageData{
-			Template: "pages/product.jinja2",
-			Output:   "/products/" + event.ID + ".html",
-			Data: map[string]any{
-				"product":    product,
-				"active_nav": product.CategoryID,
-				"breadcrumb": []map[string]string{
-					{"label": "Home", "url": "/"},
-					{"label": product.CategoryName, "url": "/categories/" + product.CategoryID + ".html"},
-					{"label": product.Name, "url": ""},
-				},
-			},
-			Dependencies: []string{
-				"product:" + product.ID,
-				"brand:" + product.BrandID,
-			},
-		}, nil
-	})
-
-	hs.SetResolver("category", func(ctx context.Context, event hotstatic.Event) (*hotstatic.PageData, error) {
-		category, ok := categories[event.ID]
-		if !ok {
-			return nil, nil
-		}
-
-		categoryProducts := getProductsByCategory(event.ID)
-
-		return &hotstatic.PageData{
-			Template: "pages/category.jinja2",
-			Output:   "/categories/" + event.ID + ".html",
-			Data: map[string]any{
-				"category":   category,
-				"products":   categoryProducts,
-				"active_nav": event.ID,
-				"breadcrumb": []map[string]string{
-					{"label": "Home", "url": "/"},
-					{"label": category.Name, "url": ""},
-				},
-			},
-			Dependencies: []string{"category:" + event.ID},
-		}, nil
-	})
-
-	// Build all pages at startup
-	fmt.Println("Building pages...")
+	fmt.Println("Building all pages...")
 	if err := hs.BuildAll(ctx); err != nil {
 		log.Fatal(err)
 	}
 
-	// Start dev mode (watch for template changes)
+	// ========== START DEV MODE ==========
+
 	if devMode {
-		fmt.Println("Dev mode enabled - watching for template changes")
-		if err := hs.StartDevMode(ctx); err != nil {
-			log.Fatal(err)
-		}
+		fmt.Println("Dev mode: watching for template changes...")
+		hs.StartDevMode(ctx, func() {
+			fmt.Println("Templates changed, rebuilding...")
+			hs.BuildAll(ctx)
+		})
 	}
 
-	// Start workers for event-driven rebuilds
+	// ========== START WORKERS ==========
+
 	hs.Start()
 
 	fmt.Println("\nStats:", hs.Stats())
 
-	// HTTP server
+	// ========== HTTP SERVER ==========
+
 	mux := http.NewServeMux()
 
 	// API endpoints
 	handler := hotstatic.NewHTTPHandler(hs.HotStatic)
 	mux.Handle("/api/", handler.Router())
 
-	// Serve static assets
-	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("./static"))))
-
-	// Serve generated pages with custom 404
-	mux.Handle("/", hs.StaticHandler())
+	// Serve static files with caching
+	staticHandler := hotstatic.NewStaticHandlerWithCache("./dist", "404.html", []hotstatic.CacheRule{
+		{Pattern: `\.[a-f0-9]{8}\.(css|js)$`, MaxAge: 31536000, Immutable: true},
+		{Pattern: `\.(png|jpg|svg|webp|ico)$`, MaxAge: 86400},
+		{Pattern: `\.html$`, MaxAge: 0, MustRevalidate: true},
+	})
+	mux.Handle("/", staticHandler)
 
 	fmt.Println("\nServer running on http://localhost:8080")
 	fmt.Println("\nPages:")
@@ -279,15 +392,12 @@ func main() {
 	fmt.Println("  http://localhost:8080/categories/phones.html")
 	fmt.Println("\nAPI:")
 	fmt.Println("  POST /api/events - emit event")
+	fmt.Println("  POST /api/build  - build single page")
 	fmt.Println("  GET  /api/stats  - statistics")
-	fmt.Println("\nTry updating a product:")
+	fmt.Println("\nExample events:")
 	fmt.Println("  curl -X POST http://localhost:8080/api/events \\")
 	fmt.Println("       -H 'Content-Type: application/json' \\")
 	fmt.Println("       -d '{\"type\":\"product\",\"id\":\"1\",\"action\":\"updated\"}'")
-
-	if devMode {
-		fmt.Println("\nDev mode: Edit templates and see changes automatically!")
-	}
 
 	// Graceful shutdown
 	server := &http.Server{
@@ -298,15 +408,6 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
-	// Demo: emit event after 5 seconds
-	// With resolvers, we just emit the event - no payload needed!
-	// The resolver will fetch fresh data automatically
-	go func() {
-		time.Sleep(5 * time.Second)
-		fmt.Println("\nAuto-emitting product update event...")
-		hs.Emit("product:1", "updated")
-	}()
-
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
@@ -315,6 +416,8 @@ func main() {
 
 	<-quit
 	fmt.Println("\nShutting down...")
+
+	hs.Stop()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -326,35 +429,12 @@ func main() {
 	fmt.Println("Shutdown complete")
 }
 
-// Helper functions
-
-func getFeaturedProducts() []Product {
-	var featured []Product
-	for _, p := range products {
-		if p.InStock {
-			featured = append(featured, p)
-			if len(featured) >= 4 {
-				break
-			}
-		}
-	}
-	return featured
+// slogLogger adapts slog.Logger to hotstatic.Logger interface
+type slogLogger struct {
+	*slog.Logger
 }
 
-func getCategories() []Category {
-	var cats []Category
-	for _, cat := range categories {
-		cats = append(cats, cat)
-	}
-	return cats
-}
-
-func getProductsByCategory(categoryID string) []Product {
-	var result []Product
-	for _, p := range products {
-		if p.CategoryID == categoryID {
-			result = append(result, p)
-		}
-	}
-	return result
-}
+func (l *slogLogger) Debug(msg string, args ...any) { l.Logger.Debug(msg, args...) }
+func (l *slogLogger) Info(msg string, args ...any)  { l.Logger.Info(msg, args...) }
+func (l *slogLogger) Warn(msg string, args ...any)  { l.Logger.Warn(msg, args...) }
+func (l *slogLogger) Error(msg string, args ...any) { l.Logger.Error(msg, args...) }

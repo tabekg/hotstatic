@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
-	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -12,784 +12,139 @@ import (
 
 	"github.com/flosch/pongo2/v6"
 	"github.com/fsnotify/fsnotify"
-	"github.com/tabekg/hotstatic/pkg/builder"
-	"github.com/tabekg/hotstatic/pkg/registry"
-	"github.com/tabekg/hotstatic/pkg/worker"
 )
 
-// PongoPageConfig defines a page that uses pongo2 templates.
-type PongoPageConfig struct {
-	// Name identifies this page config
-	Name string
-
-	// PathPattern with placeholders (e.g., "/products/{id}.html")
-	PathPattern string
-
-	// Template file path relative to template dir
-	Template string
-
-	// Priority for rebuild queue (default: 0)
-	Priority int
+// PongoBuilder implements Builder interface using pongo2 templates.
+type PongoBuilder struct {
+	templateDir string
+	outputDir   string
+	templateSet *pongo2.TemplateSet
+	globals     map[string]any
+	mu          sync.RWMutex
 }
 
-// BuilderFunc is called to build all pages.
-// It's invoked at startup and on template changes in dev mode.
-type BuilderFunc func(ctx context.Context, b *PageBuilder) error
-
-// PageBuilder provides methods to build pages.
-type PageBuilder struct {
-	phs   *PongoHotStatic
-	ctx   context.Context
-	count int
+// PongoConfig for PongoBuilder.
+type PongoConfig struct {
+	TemplateDir string
+	OutputDir   string
 }
 
-// Page builds a single page and returns PageBuildResult for chaining.
-func (pb *PageBuilder) Page(template, output string, data map[string]any) *PageBuildResult {
-	start := time.Now()
-
-	if data == nil {
-		data = make(map[string]any)
+// NewPongoBuilder creates a new pongo2 builder.
+func NewPongoBuilder(cfg PongoConfig) (*PongoBuilder, error) {
+	if cfg.TemplateDir == "" {
+		cfg.TemplateDir = "./templates"
 	}
-	data["_path"] = output
-	data["_generated_at"] = time.Now()
-
-	result, err := pb.phs.pongoBuilder.Build(pb.ctx, template, output, data)
-	duration := time.Since(start)
-
-	pbr := &PageBuildResult{
-		phs:      pb.phs,
-		ctx:      pb.ctx,
-		template: template,
-		output:   output,
-		err:      err,
+	if cfg.OutputDir == "" {
+		cfg.OutputDir = "./dist"
 	}
 
-	if err == nil {
-		pbr.contentHash = result.ContentHash
-		pb.count++
-		if pb.phs.config.DevMode {
-			pb.phs.logger.Info("built page",
-				slog.String("output", output),
-				slog.Duration("time", duration),
-			)
-		}
-	} else {
-		pb.phs.logger.Error("build page failed",
-			slog.String("template", template),
-			slog.String("output", output),
-			slog.String("error", err.Error()),
-		)
+	loader := pongo2.MustNewLocalFileSystemLoader(cfg.TemplateDir)
+	templateSet := pongo2.NewSet("hotstatic", loader)
+
+	pb := &PongoBuilder{
+		templateDir: cfg.TemplateDir,
+		outputDir:   cfg.OutputDir,
+		templateSet: templateSet,
+		globals:     make(map[string]any),
 	}
-
-	return pbr
-}
-
-// PageBuildResult allows chaining DependsOn calls.
-type PageBuildResult struct {
-	phs         *PongoHotStatic
-	ctx         context.Context
-	template    string
-	output      string
-	contentHash string
-	err         error
-}
-
-// DependsOn registers dependencies for this page.
-// When events matching these entity keys are emitted, the page will be rebuilt.
-func (pbr *PageBuildResult) DependsOn(keys ...string) *PageBuildResult {
-	if pbr.err != nil {
-		return pbr
-	}
-
-	err := pbr.phs.registry.AddDependencies(pbr.ctx, registry.PageMeta{
-		Path:         pbr.output,
-		Template:     "pongo:" + pbr.template,
-		Dependencies: keys,
-		LastBuilt:    time.Now(),
-		ContentHash:  pbr.contentHash,
-	})
-	if err != nil {
-		pbr.phs.logger.Error("add dependencies failed",
-			slog.String("output", pbr.output),
-			slog.String("error", err.Error()),
-		)
-		pbr.err = err
-	}
-
-	return pbr
-}
-
-// Error returns any error that occurred during build or subscribe.
-func (pbr *PageBuildResult) Error() error {
-	return pbr.err
-}
-
-// PongoHotStatic extends HotStatic with pongo2 support.
-type PongoHotStatic struct {
-	*HotStatic
-	pongoBuilder *builder.PongoBuilder
-	pongoConfigs map[string]*PongoPageConfig
-	builderFunc  BuilderFunc
-	resolvers    map[string]ResolverFunc // entity type -> resolver
-	mu           sync.RWMutex
-}
-
-// NewWithPongo creates HotStatic with pongo2 (Django/Jinja2) support.
-func NewWithPongo(cfg Config) (*PongoHotStatic, error) {
-	// Save TemplateDir for pongo, but don't pass to base HotStatic
-	// (base uses html/template which can't parse pongo2 syntax)
-	pongoTemplateDir := cfg.TemplateDir
-	cfg.TemplateDir = ""
-
-	// Create pongo builder first
-	pongoBuilder, err := builder.NewPongoBuilder(builder.PongoConfig{
-		TemplateDir: pongoTemplateDir,
-		OutputDir:   cfg.OutputDir,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("init pongo builder: %w", err)
-	}
-
-	// Pre-create PongoHotStatic so we can reference it in the handler
-	phs := &PongoHotStatic{
-		pongoBuilder: pongoBuilder,
-		pongoConfigs: make(map[string]*PongoPageConfig),
-		resolvers:    make(map[string]ResolverFunc),
-	}
-
-	// Set custom build handler that knows about pongo configs
-	cfg.BuildHandler = phs.pongoBuildHandler
-
-	hs, err := New(cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	phs.HotStatic = hs
 
 	// Register default filters
-	phs.registerDefaultFilters()
+	pb.registerDefaultFilters()
 
-	return phs, nil
+	return pb, nil
 }
 
-// RegisterPongoPage registers a pongo2-based page configuration.
-func (phs *PongoHotStatic) RegisterPongoPage(name string, cfg PongoPageConfig) {
-	phs.mu.Lock()
-	defer phs.mu.Unlock()
+// Build renders a template and writes to output.
+func (pb *PongoBuilder) Build(ctx context.Context, templateFile, outputPath string, data map[string]any) error {
+	pb.mu.RLock()
+	globals := pb.globals
+	pb.mu.RUnlock()
 
-	cfg.Name = name
-	phs.pongoConfigs[name] = &cfg
-}
-
-// GeneratePongoPage generates a single page using pongo2 template.
-func (phs *PongoHotStatic) GeneratePongoPage(ctx context.Context, page Page, data map[string]any) error {
-	// Extract template name from page.Template (remove "pongo:" prefix if present)
-	templateName := strings.TrimPrefix(page.Template, "pongo:")
-
-	// Add common context
-	data["_path"] = page.Path
-	data["_params"] = page.Params
-	data["_generated_at"] = time.Now()
-
-	// Render and write
-	result, err := phs.pongoBuilder.Build(ctx, templateName, page.Path, data)
+	// Load template
+	tpl, err := pb.templateSet.FromFile(templateFile)
 	if err != nil {
-		return fmt.Errorf("pongo build %s: %w", page.Path, err)
+		return fmt.Errorf("load template %s: %w", templateFile, err)
 	}
 
-	// Register page dependencies
-	err = phs.registry.AddDependencies(ctx, registry.PageMeta{
-		Path:         page.Path,
-		Template:     "pongo:" + templateName,
-		Params:       page.Params,
-		Dependencies: page.Dependencies,
-		LastBuilt:    time.Now(),
-		ContentHash:  result.ContentHash,
-	})
+	// Merge globals with data
+	context := pongo2.Context{}
+	for k, v := range globals {
+		context[k] = v
+	}
+	for k, v := range data {
+		context[k] = v
+	}
+
+	// Add built-in variables
+	context["_generated_at"] = time.Now()
+	context["_template"] = templateFile
+	context["_output"] = outputPath
+
+	// Render
+	content, err := tpl.Execute(context)
 	if err != nil {
-		return fmt.Errorf("add dependencies %s: %w", page.Path, err)
+		return fmt.Errorf("render template %s: %w", templateFile, err)
+	}
+
+	// Write to file
+	fullPath := filepath.Join(pb.outputDir, outputPath)
+
+	// Ensure directory exists
+	dir := filepath.Dir(fullPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("create directory %s: %w", dir, err)
+	}
+
+	if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+		return fmt.Errorf("write file %s: %w", fullPath, err)
 	}
 
 	return nil
 }
 
-// BuildPongoPage rebuilds a single pongo2 page with the given payload.
-func (phs *PongoHotStatic) BuildPongoPage(ctx context.Context, pagePath string, payload map[string]any) (*BuildResult, error) {
-	meta, err := phs.registry.GetPage(ctx, pagePath)
-	if err != nil {
-		return nil, err
+// Delete removes a file from output directory.
+func (pb *PongoBuilder) Delete(outputPath string) error {
+	fullPath := filepath.Join(pb.outputDir, outputPath)
+	if err := os.Remove(fullPath); err != nil && !os.IsNotExist(err) {
+		return err
 	}
-	if meta == nil {
-		return nil, fmt.Errorf("page not found: %s", pagePath)
-	}
-
-	// Check if it's a pongo page
-	if !strings.HasPrefix(meta.Template, "pongo:") {
-		return phs.Build(ctx, pagePath, payload)
-	}
-
-	templateName := strings.TrimPrefix(meta.Template, "pongo:")
-	start := time.Now()
-
-	// Add common context
-	payload["_path"] = meta.Path
-	payload["_params"] = meta.Params
-	payload["_generated_at"] = time.Now()
-
-	// Render
-	result, err := phs.pongoBuilder.Build(ctx, templateName, meta.Path, payload)
-	if err != nil {
-		return &BuildResult{
-			Page:      Page{Path: meta.Path},
-			Success:   false,
-			Error:     err.Error(),
-			Duration:  time.Since(start),
-			Timestamp: time.Now(),
-		}, err
-	}
-
-	// Update registry
-	phs.registry.UpdateLastBuilt(ctx, meta.Path, time.Now(), result.ContentHash)
-
-	return &BuildResult{
-		Page: Page{
-			Path:         meta.Path,
-			Template:     meta.Template,
-			Dependencies: meta.Dependencies,
-			Params:       meta.Params,
-			LastBuilt:    time.Now(),
-			ContentHash:  result.ContentHash,
-		},
-		Success:   true,
-		Duration:  time.Since(start),
-		Changed:   result.Changed,
-		Timestamp: time.Now(),
-	}, nil
-}
-
-// PongoBuilder returns the underlying pongo2 builder.
-func (phs *PongoHotStatic) PongoBuilder() *builder.PongoBuilder {
-	return phs.pongoBuilder
-}
-
-// AddFilter adds a custom template filter.
-// Usage: {{ value|myfilter }} or {{ value|myfilter:arg }}
-func (phs *PongoHotStatic) AddFilter(name string, fn pongo2.FilterFunction) error {
-	return phs.pongoBuilder.AddFilter(name, fn)
+	return nil
 }
 
 // AddGlobal adds a global variable available in all templates.
-func (phs *PongoHotStatic) AddGlobal(name string, value any) {
-	phs.pongoBuilder.AddGlobal(name, value)
+func (pb *PongoBuilder) AddGlobal(name string, value any) {
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
+	pb.globals[name] = value
 }
 
-// ReloadTemplates reloads all templates from disk.
-func (phs *PongoHotStatic) ReloadTemplates() error {
-	return phs.pongoBuilder.LoadTemplates()
+// AddFilter adds a custom template filter.
+func (pb *PongoBuilder) AddFilter(name string, fn pongo2.FilterFunction) error {
+	return pongo2.RegisterFilter(name, fn)
 }
 
-// SetResolver registers a resolver function for an entity type.
-// When an event of this type is received, the resolver transforms it into PageData.
-//
-// Example:
-//
-//	hs.SetResolver("product", func(ctx context.Context, event hotstatic.Event) (*hotstatic.PageData, error) {
-//	    product := getProduct(event.ID)
-//	    return &hotstatic.PageData{
-//	        Template: "pages/product.jinja2",
-//	        Output:   "/products/" + event.ID + ".html",
-//	        Data: map[string]any{
-//	            "product": product,
-//	            "brand":   getBrand(product.BrandID),
-//	        },
-//	        Dependencies: []string{"product:" + event.ID, "brand:" + product.BrandID},
-//	    }, nil
-//	})
-func (phs *PongoHotStatic) SetResolver(entityType string, fn ResolverFunc) {
-	phs.mu.Lock()
-	defer phs.mu.Unlock()
-	phs.resolvers[entityType] = fn
-}
+// Reload reloads all templates (clears cache).
+func (pb *PongoBuilder) Reload() error {
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
 
-// GetResolver returns the resolver for an entity type, or nil if not found.
-func (phs *PongoHotStatic) GetResolver(entityType string) ResolverFunc {
-	phs.mu.RLock()
-	defer phs.mu.RUnlock()
-	return phs.resolvers[entityType]
-}
-
-// BuildWithResolver builds a page using the resolver for the given event.
-// Returns error if no resolver is registered for the event type.
-func (phs *PongoHotStatic) BuildWithResolver(ctx context.Context, event Event) (*BuildResult, error) {
-	phs.mu.RLock()
-	resolver, ok := phs.resolvers[event.Type]
-	phs.mu.RUnlock()
-
-	if !ok {
-		return nil, fmt.Errorf("no resolver for entity type: %s", event.Type)
-	}
-
-	// Call resolver to get page data
-	pageData, err := resolver(ctx, event)
-	if err != nil {
-		return nil, fmt.Errorf("resolver error: %w", err)
-	}
-
-	if pageData == nil {
-		// Resolver returned nil - skip this event (e.g., deleted entity)
-		return &BuildResult{
-			Success:   true,
-			Timestamp: time.Now(),
-		}, nil
-	}
-
-	start := time.Now()
-
-	// Add common context
-	if pageData.Data == nil {
-		pageData.Data = make(map[string]any)
-	}
-	pageData.Data["_path"] = pageData.Output
-	pageData.Data["_generated_at"] = time.Now()
-
-	// Build the page
-	result, err := phs.pongoBuilder.Build(ctx, pageData.Template, pageData.Output, pageData.Data)
-	if err != nil {
-		return &BuildResult{
-			Page:      Page{Path: pageData.Output},
-			Success:   false,
-			Error:     err.Error(),
-			Duration:  time.Since(start),
-			Timestamp: time.Now(),
-		}, err
-	}
-
-	// Register dependencies
-	err = phs.registry.AddDependencies(ctx, registry.PageMeta{
-		Path:         pageData.Output,
-		Template:     "pongo:" + pageData.Template,
-		Dependencies: pageData.Dependencies,
-		LastBuilt:    time.Now(),
-		ContentHash:  result.ContentHash,
-	})
-	if err != nil {
-		phs.logger.Error("add dependencies failed",
-			slog.String("output", pageData.Output),
-			slog.String("error", err.Error()),
-		)
-	}
-
-	return &BuildResult{
-		Page: Page{
-			Path:         pageData.Output,
-			Template:     "pongo:" + pageData.Template,
-			Dependencies: pageData.Dependencies,
-			LastBuilt:    time.Now(),
-			ContentHash:  result.ContentHash,
-		},
-		Success:   true,
-		Duration:  time.Since(start),
-		Changed:   result.Changed,
-		Timestamp: time.Now(),
-	}, nil
-}
-
-// SetBuilder sets the builder function that defines how pages are built.
-// This function is called at startup (BuildAll) and on template changes in dev mode.
-func (phs *PongoHotStatic) SetBuilder(fn BuilderFunc) {
-	phs.mu.Lock()
-	defer phs.mu.Unlock()
-	phs.builderFunc = fn
-}
-
-// BuildAll executes the builder function to build all pages.
-// Call this at startup after SetBuilder.
-func (phs *PongoHotStatic) BuildAll(ctx context.Context) error {
-	start := time.Now()
-
-	phs.mu.RLock()
-	fn := phs.builderFunc
-	phs.mu.RUnlock()
-
-	if fn == nil {
-		return fmt.Errorf("builder function not set, call SetBuilder first")
-	}
-
-	pb := &PageBuilder{
-		phs:   phs,
-		ctx:   ctx,
-		count: 0,
-	}
-
-	err := fn(ctx, pb)
-	duration := time.Since(start)
-
-	if err == nil && phs.config.DevMode {
-		phs.logger.Info("build complete",
-			slog.Int("pages", pb.count),
-			slog.Duration("total", duration),
-		)
-	}
-
-	return err
-}
-
-// BuildStaticPages builds all static pages from StaticPagesDir.
-// Scans the directory for templates and builds each one.
-// Example: templates/pages/about.jinja2 → /about.html
-func (phs *PongoHotStatic) BuildStaticPages(ctx context.Context) error {
-	if phs.config.StaticPagesDir == "" {
-		return nil
-	}
-
-	templateDir := phs.pongoBuilder.TemplateDir()
-	pagesDir := filepath.Join(templateDir, phs.config.StaticPagesDir)
-
-	count := 0
-	err := filepath.WalkDir(pagesDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-
-		ext := filepath.Ext(path)
-		if ext != ".html" && ext != ".htm" && ext != ".jinja2" && ext != ".j2" {
-			return nil
-		}
-
-		// Get relative path from template dir (e.g., "pages/about.jinja2")
-		relPath, err := filepath.Rel(templateDir, path)
-		if err != nil {
-			return err
-		}
-
-		// Get relative path from pages dir (e.g., "about.jinja2" or "sub/page.jinja2")
-		relFromPages, err := filepath.Rel(pagesDir, path)
-		if err != nil {
-			return err
-		}
-
-		// Convert to output path: about.jinja2 → /about.html
-		outputPath := "/" + strings.TrimSuffix(relFromPages, ext) + ".html"
-
-		data := map[string]any{
-			"_path":         outputPath,
-			"_generated_at": time.Now(),
-		}
-
-		_, err = phs.pongoBuilder.Build(ctx, relPath, outputPath, data)
-		if err != nil {
-			return fmt.Errorf("build static page %s: %w", outputPath, err)
-		}
-
-		phs.logger.Debug("built static page",
-			slog.String("output", outputPath),
-			slog.String("template", relPath),
-		)
-		count++
-
-		return nil
-	})
-
-	if err != nil {
-		return err
-	}
-
-	phs.logger.Info("built static pages", slog.Int("count", count))
-	return nil
-}
-
-// StartDevMode starts file watcher for templates and additional directories.
-// On template change, all pages are rebuilt via BuildAll.
-// On watched dir change, OnWatchedFileChange callback is called.
-func (phs *PongoHotStatic) StartDevMode(ctx context.Context) error {
-	if !phs.config.DevMode {
-		return nil
-	}
-
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return fmt.Errorf("create watcher: %w", err)
-	}
-
-	templateDir := phs.pongoBuilder.TemplateDir()
-
-	// Watch template directory recursively
-	err = filepath.WalkDir(templateDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return watcher.Add(path)
-		}
-		return nil
-	})
-	if err != nil {
-		watcher.Close()
-		return fmt.Errorf("watch template dir: %w", err)
-	}
-
-	// Watch static directory if configured
-	if phs.config.StaticDir != "" {
-		err = filepath.WalkDir(phs.config.StaticDir, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d.IsDir() {
-				return watcher.Add(path)
-			}
-			return nil
-		})
-		if err != nil {
-			phs.logger.Warn("could not watch static directory",
-				slog.String("dir", phs.config.StaticDir),
-				slog.String("error", err.Error()),
-			)
-		}
-	}
-
-	phs.logger.Info("dev mode started",
-		slog.String("templates", templateDir),
-		slog.String("static", phs.config.StaticDir),
-	)
-
-	go phs.watchLoop(ctx, watcher, templateDir)
+	loader := pongo2.MustNewLocalFileSystemLoader(pb.templateDir)
+	pb.templateSet = pongo2.NewSet("hotstatic", loader)
 
 	return nil
 }
 
-func (phs *PongoHotStatic) watchLoop(ctx context.Context, watcher *fsnotify.Watcher, templateDir string) {
-	defer watcher.Close()
-
-	// Debounce state
-	var pendingTemplate bool
-	var pendingStatic bool
-	var lastTemplatePath string
-	var lastStaticPath string
-	var lastEvent time.Time
-	var mu sync.Mutex
-	debounceDelay := 100 * time.Millisecond
-
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-
-		case event, ok := <-watcher.Events:
-			if !ok {
-				return
-			}
-
-			// Handle write, create, remove events
-			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove) == 0 {
-				continue
-			}
-
-			mu.Lock()
-			// Check if it's a template file or static file
-			if strings.HasPrefix(event.Name, templateDir) {
-				pendingTemplate = true
-				lastTemplatePath = event.Name
-			} else {
-				pendingStatic = true
-				lastStaticPath = event.Name
-			}
-			lastEvent = time.Now()
-			mu.Unlock()
-
-		case <-ticker.C:
-			mu.Lock()
-			if time.Since(lastEvent) >= debounceDelay {
-				if pendingTemplate {
-					pendingTemplate = false
-					path := lastTemplatePath
-					mu.Unlock()
-
-					phs.logger.Info("template changed", slog.String("path", path))
-					if phs.config.OnTemplateChange != nil {
-						phs.config.OnTemplateChange(path)
-					}
-					phs.rebuildAll(ctx)
-				} else if pendingStatic {
-					pendingStatic = false
-					path := lastStaticPath
-					mu.Unlock()
-
-					phs.logger.Info("static file changed", slog.String("path", path))
-					if phs.config.OnStaticChange != nil {
-						phs.config.OnStaticChange(path)
-					}
-				} else {
-					mu.Unlock()
-				}
-			} else {
-				mu.Unlock()
-			}
-
-		case err, ok := <-watcher.Errors:
-			if !ok {
-				return
-			}
-			phs.logger.Error("watcher error", slog.String("error", err.Error()))
-		}
-	}
+// TemplateDir returns the template directory.
+func (pb *PongoBuilder) TemplateDir() string {
+	return pb.templateDir
 }
 
-func (phs *PongoHotStatic) rebuildAll(ctx context.Context) {
-	phs.logger.Info("file changed, rebuilding pages")
-
-	// Reload templates to pick up changes
-	if err := phs.ReloadTemplates(); err != nil {
-		phs.logger.Error("reload templates failed", slog.String("error", err.Error()))
-		return
-	}
-
-	// Rebuild all pages using builder function
-	if phs.builderFunc != nil {
-		if err := phs.BuildAll(ctx); err != nil {
-			phs.logger.Error("rebuild pages failed", slog.String("error", err.Error()))
-		}
-	}
+// OutputDir returns the output directory.
+func (pb *PongoBuilder) OutputDir() string {
+	return pb.outputDir
 }
 
-// pongoBuildHandler handles page rebuild jobs for both pongo and standard pages.
-func (phs *PongoHotStatic) pongoBuildHandler(ctx context.Context, job worker.Job) error {
-	// Try to use resolver if available
-	if job.TriggerKey != "" {
-		parts := strings.SplitN(job.TriggerKey, ":", 2)
-		if len(parts) == 2 {
-			entityType := parts[0]
-			entityID := parts[1]
-
-			phs.mu.RLock()
-			resolver, hasResolver := phs.resolvers[entityType]
-			phs.mu.RUnlock()
-
-			if hasResolver {
-				event := Event{
-					Type:    entityType,
-					ID:      entityID,
-					Payload: job.Payload,
-				}
-				_, err := phs.buildWithResolverInternal(ctx, resolver, event)
-				return err
-			}
-		}
-	}
-
-	// No resolver - fall back to old behavior (requires payload)
-	if len(job.Payload) == 0 {
-		phs.logger.Warn("skipping rebuild - no payload and no resolver",
-			"path", job.Path,
-			"trigger", job.TriggerKey,
-		)
-		return nil
-	}
-
-	meta, err := phs.registry.GetPage(ctx, job.Path)
-	if err != nil {
-		return err
-	}
-	if meta == nil {
-		return fmt.Errorf("page not found: %s", job.Path)
-	}
-
-	// Check if it's a pongo page
-	if strings.HasPrefix(meta.Template, "pongo:") {
-		_, err = phs.BuildPongoPage(ctx, job.Path, job.Payload)
-		return err
-	}
-
-	// Fall back to base handler for non-pongo pages
-	_, err = phs.buildPageWithPayload(ctx, meta, job.Payload)
-	return err
-}
-
-// buildWithResolverInternal is the internal implementation without locking.
-func (phs *PongoHotStatic) buildWithResolverInternal(ctx context.Context, resolver ResolverFunc, event Event) (*BuildResult, error) {
-	// Call resolver to get page data
-	pageData, err := resolver(ctx, event)
-	if err != nil {
-		return nil, fmt.Errorf("resolver error: %w", err)
-	}
-
-	if pageData == nil {
-		// Resolver returned nil - skip this event (e.g., deleted entity)
-		phs.logger.Debug("resolver returned nil, skipping",
-			slog.String("type", event.Type),
-			slog.String("id", event.ID),
-		)
-		return &BuildResult{
-			Success:   true,
-			Timestamp: time.Now(),
-		}, nil
-	}
-
-	start := time.Now()
-
-	// Add common context
-	if pageData.Data == nil {
-		pageData.Data = make(map[string]any)
-	}
-	pageData.Data["_path"] = pageData.Output
-	pageData.Data["_generated_at"] = time.Now()
-
-	// Build the page
-	result, err := phs.pongoBuilder.Build(ctx, pageData.Template, pageData.Output, pageData.Data)
-	if err != nil {
-		return &BuildResult{
-			Page:      Page{Path: pageData.Output},
-			Success:   false,
-			Error:     err.Error(),
-			Duration:  time.Since(start),
-			Timestamp: time.Now(),
-		}, err
-	}
-
-	// Register dependencies
-	err = phs.registry.AddDependencies(ctx, registry.PageMeta{
-		Path:         pageData.Output,
-		Template:     "pongo:" + pageData.Template,
-		Dependencies: pageData.Dependencies,
-		LastBuilt:    time.Now(),
-		ContentHash:  result.ContentHash,
-	})
-	if err != nil {
-		phs.logger.Error("add dependencies failed",
-			slog.String("output", pageData.Output),
-			slog.String("error", err.Error()),
-		)
-	}
-
-	phs.logger.Debug("built page via resolver",
-		slog.String("type", event.Type),
-		slog.String("id", event.ID),
-		slog.String("output", pageData.Output),
-		slog.Duration("time", time.Since(start)),
-	)
-
-	return &BuildResult{
-		Page: Page{
-			Path:         pageData.Output,
-			Template:     "pongo:" + pageData.Template,
-			Dependencies: pageData.Dependencies,
-			LastBuilt:    time.Now(),
-			ContentHash:  result.ContentHash,
-		},
-		Success:   true,
-		Duration:  time.Since(start),
-		Changed:   result.Changed,
-		Timestamp: time.Now(),
-	}, nil
-}
-
-func (phs *PongoHotStatic) registerDefaultFilters() {
+func (pb *PongoBuilder) registerDefaultFilters() {
 	// Format price: {{ 99.99|price }} → $99.99
 	pongo2.RegisterFilter("price", func(in *pongo2.Value, param *pongo2.Value) (*pongo2.Value, *pongo2.Error) {
 		format := "$%.2f"
@@ -843,4 +198,140 @@ func (phs *PongoHotStatic) registerDefaultFilters() {
 			return pongo2.AsValue(fmt.Sprintf("%d days ago", int(diff.Hours()/24))), nil
 		}
 	})
+}
+
+// PongoHotStatic is HotStatic with pongo2 support.
+type PongoHotStatic struct {
+	*HotStatic
+	builder *PongoBuilder
+}
+
+// NewWithPongo creates HotStatic with pongo2 support.
+func NewWithPongo(cfg Config) (*PongoHotStatic, error) {
+	builder, err := NewPongoBuilder(PongoConfig{
+		TemplateDir: cfg.TemplateDir,
+		OutputDir:   cfg.OutputDir,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	hs := New(cfg)
+	hs.SetBuilder(builder)
+
+	return &PongoHotStatic{
+		HotStatic: hs,
+		builder:   builder,
+	}, nil
+}
+
+// Builder returns the pongo2 builder.
+func (phs *PongoHotStatic) Builder() *PongoBuilder {
+	return phs.builder
+}
+
+// AddGlobal adds a global variable available in all templates.
+func (phs *PongoHotStatic) AddGlobal(name string, value any) {
+	phs.builder.AddGlobal(name, value)
+}
+
+// AddFilter adds a custom template filter.
+func (phs *PongoHotStatic) AddFilter(name string, fn pongo2.FilterFunction) error {
+	return phs.builder.AddFilter(name, fn)
+}
+
+// StartDevMode starts file watcher for templates.
+// On template change, reloads templates and calls onChange callback.
+func (phs *PongoHotStatic) StartDevMode(ctx context.Context, onChange func()) error {
+	if !phs.config.DevMode {
+		return nil
+	}
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return fmt.Errorf("create watcher: %w", err)
+	}
+
+	// Watch template directory recursively
+	err = filepath.WalkDir(phs.builder.templateDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return watcher.Add(path)
+		}
+		return nil
+	})
+	if err != nil {
+		watcher.Close()
+		return fmt.Errorf("watch template dir: %w", err)
+	}
+
+	phs.config.Logger.Info("dev mode started",
+		"templates", phs.builder.templateDir,
+	)
+
+	go phs.watchLoop(ctx, watcher, onChange)
+
+	return nil
+}
+
+func (phs *PongoHotStatic) watchLoop(ctx context.Context, watcher *fsnotify.Watcher, onChange func()) {
+	defer watcher.Close()
+
+	var pending bool
+	var lastEvent time.Time
+	var mu sync.Mutex
+	debounceDelay := 100 * time.Millisecond
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+
+			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove) == 0 {
+				continue
+			}
+
+			mu.Lock()
+			pending = true
+			lastEvent = time.Now()
+			mu.Unlock()
+
+		case <-ticker.C:
+			mu.Lock()
+			if pending && time.Since(lastEvent) >= debounceDelay {
+				pending = false
+				mu.Unlock()
+
+				phs.config.Logger.Info("template changed, reloading")
+
+				if err := phs.builder.Reload(); err != nil {
+					phs.config.Logger.Error("reload templates failed",
+						"error", err.Error(),
+					)
+				} else if onChange != nil {
+					onChange()
+				}
+			} else {
+				mu.Unlock()
+			}
+
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			phs.config.Logger.Error("watcher error",
+				"error", err.Error(),
+			)
+		}
+	}
 }

@@ -1,6 +1,6 @@
 # HotStatic
 
-A static site generator framework with reactive page rebuilds. When data changes, only affected pages are rebuilt.
+A static site generator framework with event-driven page rebuilds. When data changes, only affected pages are rebuilt.
 
 ## Use Cases
 
@@ -14,17 +14,14 @@ A static site generator framework with reactive page rebuilds. When data changes
 - **Fast** — Browser receives ready HTML (5-10ms instead of 100-500ms)
 - **SEO** — Search engines see full content immediately
 - **Cheap** — Static files can be served from CDN
-- **Reactive** — Product changed → only its page rebuilds
+- **Event-driven** — Product changed → rebuild only affected pages
+- **Simple** — You control what rebuilds via event handler
 
 ## Installation
 
 ```bash
 go get github.com/tabekg/hotstatic
 ```
-
-**Requirements:**
-- Go 1.21+
-- Redis 6+
 
 ## Quick Start
 
@@ -33,8 +30,6 @@ package main
 
 import (
     "context"
-    "log"
-
     "github.com/tabekg/hotstatic"
 )
 
@@ -42,274 +37,318 @@ func main() {
     ctx := context.Background()
 
     // Initialize
-    hs, err := hotstatic.NewWithPongo(hotstatic.Config{
-        Redis:       "localhost:6379",
+    hs, _ := hotstatic.NewWithPongo(hotstatic.Config{
         TemplateDir: "./templates",
         OutputDir:   "./dist",
-        DevMode:     true,  // enable file watching
+        Workers:     4,
+        DevMode:     true,
     })
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer hs.Stop()
 
-    // Define how to build all pages
-    hs.SetBuilder(func(ctx context.Context, b *hotstatic.PageBuilder) error {
-        // Static pages (no data needed)
-        b.Page("pages/about.jinja2", "/about.html", nil)
-        b.Page("pages/404.jinja2", "/404.html", nil)
+    // Define templates
+    hs.DefineTemplate("product", hotstatic.TemplateDef{
+        File:   "pages/product.jinja2",
+        Output: "/products/{id}.html",
 
-        // Pages with data
-        products := getProducts()
-        for _, p := range products {
-            b.Page("pages/product.jinja2", "/products/"+p.ID+".html", map[string]any{
-                "product": p,
-            }).DependsOn("product:"+p.ID, "brand:"+p.BrandID)
+        Load: func(ctx context.Context, id string) (map[string]any, error) {
+            product := db.GetProduct(id)
+            if product == nil {
+                return nil, nil // skip
+            }
+            return map[string]any{
+                "product":  product,
+                "category": db.GetCategory(product.CategoryID),
+            }, nil
+        },
+
+        LoadAll: func(ctx context.Context) ([]string, error) {
+            return db.GetAllProductIDs(), nil
+        },
+    })
+
+    hs.DefineTemplate("home", hotstatic.TemplateDef{
+        File:   "pages/home.jinja2",
+        Output: "/index.html",
+
+        Load: func(ctx context.Context, id string) (map[string]any, error) {
+            return map[string]any{
+                "featured": db.GetFeaturedProducts(),
+            }, nil
+        },
+
+        LoadAll: func(ctx context.Context) ([]string, error) {
+            return []string{""}, nil // single page
+        },
+    })
+
+    // Event handler — you decide what rebuilds
+    hs.OnEvent(func(ctx context.Context, event hotstatic.Event) error {
+        switch event.Type {
+        case "product":
+            switch event.Action {
+            case "created":
+                hs.Build("product", event.ID)
+                hs.Build("home", "")
+            case "updated":
+                hs.Build("product", event.ID)
+            case "deleted":
+                hs.Delete("product", event.ID)
+                hs.Build("home", "")
+            }
         }
-
-        categories := getCategories()
-        for _, c := range categories {
-            b.Page("pages/category.jinja2", "/categories/"+c.ID+".html", map[string]any{
-                "category": c,
-                "products": getProductsByCategory(c.ID),
-            }).DependsOn("category:"+c.ID)
-        }
-
         return nil
     })
 
-    // Build all pages at startup
-    if err := hs.BuildAll(ctx); err != nil {
-        log.Fatal(err)
-    }
+    // Build all at startup
+    hs.BuildAll(ctx)
 
-    // Start file watcher (in dev mode, rebuilds on template changes)
-    hs.StartDevMode(ctx)
-
-    // Start workers for event-driven rebuilds
+    // Start workers
     hs.Start()
 
-    // When data changes — emit event with new data
-    hs.EmitWithPayload("product:1", "updated", map[string]any{
-        "product": updatedProduct,
-    })
-    // All pages subscribed to "product:1" will rebuild automatically
+    // Emit events when data changes
+    hs.Emit("product", "123", "updated")
 }
+```
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                      HotStatic                          │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│  DefineTemplate("product", ...)                         │
+│  DefineTemplate("category", ...)                        │
+│  DefineTemplate("home", ...)                            │
+│                                                         │
+│  OnEvent(handler) ─────────────────────┐                │
+│                                        │                │
+│  BuildAll() ──► LoadAll() ──► Load() ──► Build pages    │
+│                                        │                │
+│  Emit(event) ──► handler ──► Build() ──► Workers ──► Build pages
+│                                                         │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ## Configuration
 
 ```go
 hotstatic.Config{
-    // Redis (required)
-    Redis:         "localhost:6379",
-    RedisPassword: "",                // optional
-    RedisDB:       0,                 // database number
-    RedisPrefix:   "hs",              // key prefix
+    // Template directory
+    TemplateDir: "./templates",
 
-    // Templates
-    TemplateDir:   "./templates",
+    // Output directory for generated HTML
+    OutputDir: "./dist",
 
-    // Output directory for HTML
-    OutputDir:     "./dist",
+    // Parallel workers for building (default: 4)
+    Workers: 4,
 
-    // Custom 404 page (relative to OutputDir)
-    NotFoundPage:  "404.html",
+    // Debounce - same page won't rebuild more than once per duration (default: 1s)
+    Debounce: time.Second,
 
-    // Development mode (auto-rebuild on template changes)
-    DevMode:       true,
+    // Development mode - enables file watching
+    DevMode: true,
 
-    // Static files directory to watch (for triggering asset builds)
-    StaticDir:     "./src",
-
-    // Callback when template changes (before rebuild)
-    OnTemplateChange: func(path string) {
-        log.Println("Template changed:", path)
-    },
-
-    // Callback when static file changes
-    OnStaticChange: func(path string) {
-        log.Println("Static changed:", path)
-        exec.Command("yarn", "build").Run()
-    },
-
-    // Cache rules for static files
-    CacheRules: []hotstatic.CacheRule{
-        {Pattern: `\.[a-f0-9]{8}\.(css|js)$`, MaxAge: 31536000, Immutable: true},
-        {Pattern: `\.(png|jpg|svg|webp)$`, MaxAge: 86400},
-        {Pattern: `\.html$`, MaxAge: 0, MustRevalidate: true},
-    },
-
-    // Performance
-    Workers:       4,                 // parallel workers
-    QueueSize:     10000,             // queue size
-
-    // Logging
-    Logger:        slog.Default(),
+    // Logger (optional)
+    Logger: myLogger,
 }
 ```
 
 ## API
 
-### SetBuilder — Define How Pages Are Built
+### DefineTemplate
+
+Defines a template with data loading functions:
 
 ```go
-hs.SetBuilder(func(ctx context.Context, b *hotstatic.PageBuilder) error {
-    // Static page (no data)
-    b.Page("pages/about.jinja2", "/about.html", nil)
+hs.DefineTemplate("product", hotstatic.TemplateDef{
+    // Template file (relative to TemplateDir)
+    File: "pages/product.jinja2",
 
-    // Page with data
-    b.Page("pages/product.jinja2", "/products/1.html", map[string]any{
-        "product": product,
-    })
+    // Output path pattern ({id} is replaced)
+    Output: "/products/{id}.html",
 
-    // Page with data and dependencies (for event-driven rebuilds)
-    b.Page("pages/product.jinja2", "/products/1.html", map[string]any{
-        "product": product,
-    }).DependsOn("product:1", "brand:apple")
+    // Load data for a single page
+    // Return nil to skip (e.g., deleted entity)
+    Load: func(ctx context.Context, id string) (map[string]any, error) {
+        product := db.GetProduct(id)
+        if product == nil {
+            return nil, nil
+        }
+        return map[string]any{"product": product}, nil
+    },
+
+    // Load all IDs for BuildAll
+    LoadAll: func(ctx context.Context) ([]string, error) {
+        return db.GetAllProductIDs(), nil
+    },
+})
+```
+
+### OnEvent
+
+Sets the event handler. You control what pages rebuild:
+
+```go
+hs.OnEvent(func(ctx context.Context, event hotstatic.Event) error {
+    // event.Type   = "product"
+    // event.ID     = "123"
+    // event.Action = "updated"
+
+    switch event.Type {
+    case "product":
+        switch event.Action {
+        case "created":
+            // New product: build page, update lists
+            hs.Build("product", event.ID)
+            hs.Build("home", "")
+            product := db.GetProduct(event.ID)
+            hs.Build("category", product.CategoryID)
+
+        case "updated":
+            // Product changed: rebuild its page
+            hs.Build("product", event.ID)
+
+        case "deleted":
+            // Product removed: delete page, update lists
+            hs.Delete("product", event.ID)
+            hs.Build("home", "")
+            hs.Build("category", event.Metadata["category_id"])
+        }
+
+    case "category":
+        switch event.Action {
+        case "updated":
+            // Category name changed: rebuild category and all its products
+            hs.Build("category", event.ID)
+            for _, p := range db.GetProductsByCategory(event.ID) {
+                hs.Build("product", p.ID)
+            }
+        }
+
+    case "brand":
+        switch event.Action {
+        case "updated":
+            // Brand changed: rebuild all its products
+            for _, p := range db.GetProductsByBrand(event.ID) {
+                hs.Build("product", p.ID)
+            }
+        }
+    }
 
     return nil
 })
 ```
 
-### BuildAll — Build All Pages
+### BuildAll
+
+Builds all pages at startup:
 
 ```go
-// Called at startup and automatically in dev mode on template changes
 err := hs.BuildAll(ctx)
 ```
 
-### StartDevMode — Watch Templates for Changes
+Calls `LoadAll()` for each template, then `Load()` for each ID.
+
+### Build
+
+Queues a page for building:
 
 ```go
-// Watches template directory and WatchDirs, calls BuildAll on template change
-err := hs.StartDevMode(ctx)
+hs.Build("product", "123")
 ```
 
-### Dev Mode Callbacks
+Workers process the queue, call `Load()`, render template, write file.
+
+### Delete
+
+Removes a generated page:
 
 ```go
-hotstatic.Config{
-    DevMode:   true,
-    StaticDir: "./src",  // watch this directory for static file changes
-    
-    // Called when template changes (before rebuild)
-    OnTemplateChange: func(path string) {
-        log.Println("Template changed:", path)
-    },
-    
-    // Called when static file changes
-    // Use this to trigger asset builds (e.g., yarn, webpack, esbuild)
-    OnStaticChange: func(path string) {
-        log.Println("Static changed:", path)
-        cmd := exec.Command("yarn", "build")
-        cmd.Stdout = os.Stdout
-        cmd.Stderr = os.Stderr
-        cmd.Run()
-    },
-}
+hs.Delete("product", "123")
 ```
 
-### SetResolver — Define How to Rebuild Pages
+### Emit
 
-Resolvers transform events into page data. When an event is received, the resolver fetches fresh data and returns everything needed to rebuild the page.
-
-```go
-hs.SetResolver("product", func(ctx context.Context, event hotstatic.Event) (*hotstatic.PageData, error) {
-    // Fetch fresh data from your database
-    product := getProduct(event.ID)
-    if product == nil {
-        return nil, nil // Product deleted - skip rebuild
-    }
-    
-    brand := getBrand(product.BrandID)
-    category := getCategory(product.CategoryID)
-    
-    return &hotstatic.PageData{
-        Template: "pages/product.jinja2",
-        Output:   "/products/" + event.ID + ".html",
-        Data: map[string]any{
-            "product":  product,
-            "brand":    brand,
-            "category": category,
-        },
-        Dependencies: []string{
-            "product:" + event.ID,
-            "brand:" + product.BrandID,
-            "category:" + product.CategoryID,
-        },
-    }, nil
-})
-
-hs.SetResolver("category", func(ctx context.Context, event hotstatic.Event) (*hotstatic.PageData, error) {
-    category := getCategory(event.ID)
-    products := getProductsByCategory(event.ID)
-    
-    return &hotstatic.PageData{
-        Template: "pages/category.jinja2",
-        Output:   "/categories/" + event.ID + ".html",
-        Data: map[string]any{
-            "category": category,
-            "products": products,
-        },
-        Dependencies: []string{"category:" + event.ID},
-    }, nil
-})
-```
-
-**Benefits:**
-- Logic in one place: event → data → template → dependencies
-- No need to pass payload with every event
-- Resolver fetches fresh data automatically
-- Easy to test and maintain
-
-### Emit Event (Trigger Rebuild)
+Sends an event to the event handler:
 
 ```go
-// Simple - resolver fetches the data
-hs.Emit("product:123", "updated")
+// Simple
+hs.Emit("product", "123", "updated")
 
-// All pages that depend on "product:123" will rebuild
-// The resolver for "product" is called to get fresh data
-
-// Or with payload (if you already have the data)
-hs.EmitWithPayload("product:123", "updated", map[string]any{
-    "product": updatedProduct,
-})
-```
-
-### Event with Priority
-
-```go
+// With metadata
 hs.EmitEvent(hotstatic.Event{
     Type:     "product",
     ID:       "123",
-    Action:   "updated",
-    Priority: 100,  // higher = more urgent
-    Payload: map[string]any{
-        "product": product,
-    },
+    Action:   "deleted",
+    Metadata: map[string]any{"category_id": "phones"},
 })
 ```
 
-### List Pages
+### Start / Stop
+
+Start and stop workers:
 
 ```go
-pages, err := hs.ListPages(ctx)
-// ["/products/1.html", "/products/2.html", "/categories/phones.html"]
+hs.Start()
+defer hs.Stop()
 ```
 
-### Delete Page
+## HTTP API
 
 ```go
-err := hs.RemoveDependencies(ctx, "/products/123.html")
+handler := hotstatic.NewHTTPHandler(hs.HotStatic)
+http.Handle("/api/", handler.Router())
 ```
 
-## Templates (Pongo2 / Django / Jinja2)
+### Endpoints
+
+| Method | URL | Description |
+|--------|-----|-------------|
+| POST | `/api/events` | Emit event |
+| POST | `/api/build` | Build single page |
+| POST | `/api/build/all` | Rebuild all pages |
+| GET | `/api/stats` | Statistics |
+| GET | `/api/health` | Health check |
+
+### Examples
+
+**Emit event:**
+```bash
+curl -X POST http://localhost:8080/api/events \
+  -H "Content-Type: application/json" \
+  -d '{"type": "product", "id": "123", "action": "updated"}'
+```
+
+**Build single page:**
+```bash
+curl -X POST http://localhost:8080/api/build \
+  -H "Content-Type: application/json" \
+  -d '{"template": "product", "id": "123"}'
+```
+
+**Statistics:**
+```bash
+curl http://localhost:8080/api/stats
+```
+
+## Static File Server
+
+Serve generated files with caching:
+
+```go
+staticHandler := hotstatic.NewStaticHandlerWithCache("./dist", "404.html", []hotstatic.CacheRule{
+    {Pattern: `\.[a-f0-9]{8}\.(css|js)$`, MaxAge: 31536000, Immutable: true},
+    {Pattern: `\.(png|jpg|svg|webp)$`, MaxAge: 86400},
+    {Pattern: `\.html$`, MaxAge: 0, MustRevalidate: true},
+})
+http.Handle("/", staticHandler)
+```
+
+## Templates (Pongo2 / Jinja2)
 
 ### Base Layout
 
-**templates/layouts/base.html:**
+**templates/layouts/base.jinja2:**
 ```html
 <!DOCTYPE html>
 <html>
@@ -317,12 +356,7 @@ err := hs.RemoveDependencies(ctx, "/products/123.html")
     <title>{% block title %}My Site{% endblock %}</title>
 </head>
 <body>
-    <header>{% include "components/header.html" %}</header>
-    
-    <main>
-        {% block content %}{% endblock %}
-    </main>
-    
+    <main>{% block content %}{% endblock %}</main>
     <footer>Generated: {{ _generated_at|date:"Y-m-d H:i:s" }}</footer>
 </body>
 </html>
@@ -330,30 +364,22 @@ err := hs.RemoveDependencies(ctx, "/products/123.html")
 
 ### Product Page
 
-**templates/pages/product.html:**
+**templates/pages/product.jinja2:**
 ```html
-{% extends "layouts/base.html" %}
+{% extends "layouts/base.jinja2" %}
 
 {% block title %}{{ product.Name }}{% endblock %}
 
 {% block content %}
-    <h1>{{ product.Name }}</h1>
-    <p class="price">{{ product.Price|price }}</p>
-    <p>{{ product.Description }}</p>
-    
-    {% if product.InStock %}
-        <button>Buy Now</button>
-    {% else %}
-        <span>Out of Stock</span>
-    {% endif %}
-    
-    {% if product.Features %}
-    <ul>
-        {% for feature in product.Features %}
-        <li>{{ feature }}</li>
-        {% endfor %}
-    </ul>
-    {% endif %}
+<h1>{{ product.Name }}</h1>
+<p class="price">{{ product.Price|price }}</p>
+<p>{{ product.Description }}</p>
+
+{% if product.InStock %}
+    <button>Buy Now</button>
+{% else %}
+    <span>Out of Stock</span>
+{% endif %}
 {% endblock %}
 ```
 
@@ -365,285 +391,29 @@ err := hs.RemoveDependencies(ctx, "/products/123.html")
 | `truncate` | `{{ text\|truncate:100 }}` | Truncated text... |
 | `pluralize` | `{{ count\|pluralize:"item,items" }}` | item/items |
 | `timeago` | `{{ date\|timeago }}` | 2 hours ago |
-| `date` | `{{ date\|date:"Y-m-d" }}` | 2024-01-15 |
-| `default` | `{{ value\|default:"N/A" }}` | N/A if empty |
-| `length` | `{{ items\|length }}` | 5 |
-| `join` | `{{ items\|join:", " }}` | a, b, c |
-| `upper` | `{{ text\|upper }}` | TEXT |
-| `lower` | `{{ text\|lower }}` | text |
-| `safe` | `{{ html\|safe }}` | Unescaped HTML |
 
 ### Custom Filter
 
 ```go
-hs.AddFilter("currency", func(in *pongo2.Value, param *pongo2.Value) (*pongo2.Value, *pongo2.Error) {
-    symbol := param.String()
-    if symbol == "" {
-        symbol = "$"
-    }
-    return pongo2.AsValue(fmt.Sprintf("%s%.2f", symbol, in.Float())), nil
+hs.AddFilter("currency", func(in, param *pongo2.Value) (*pongo2.Value, *pongo2.Error) {
+    return pongo2.AsValue(fmt.Sprintf("$%.2f", in.Float())), nil
 })
 ```
-
-Usage: `{{ price|currency:"EUR " }}` → `EUR 99.99`
 
 ### Global Variables
 
 ```go
 hs.AddGlobal("site_name", "My Store")
-hs.AddGlobal("current_year", time.Now().Year())
 ```
 
-Usage: `<title>{{ site_name }}</title>`
+## Dev Mode
 
-## Serving Static Files
+Watch templates and rebuild on changes:
 
 ```go
-mux := http.NewServeMux()
-
-// API endpoints
-handler := hotstatic.NewHTTPHandler(hs.HotStatic)
-mux.Handle("/api/", handler.Router())
-
-// Serve generated pages with custom 404
-mux.Handle("/", hs.StaticHandler())
-
-http.ListenAndServe(":8080", mux)
-```
-
-### Custom 404 Page
-
-1. Create template `templates/pages/404.jinja2`:
-
-```html
-{% extends "layouts/base.html" %}
-
-{% block title %}Page Not Found{% endblock %}
-
-{% block content %}
-<div class="error-page">
-    <h1>404</h1>
-    <p>Page not found</p>
-    <a href="/">Go Home</a>
-</div>
-{% endblock %}
-```
-
-2. Add to your builder:
-
-```go
-hs.SetBuilder(func(ctx context.Context, b *hotstatic.PageBuilder) error {
-    b.Page("pages/404.jinja2", "/404.html", nil)
-    // ... other pages
-    return nil
+hs.StartDevMode(ctx, func() {
+    hs.BuildAll(ctx)
 })
-```
-
-3. Set in config:
-
-```go
-hotstatic.Config{
-    // ...
-    NotFoundPage: "404.html",
-}
-```
-
-Now any non-existent URL will show your custom 404 page with HTTP status 404.
-
-### Cache Rules
-
-Configure caching behavior per file type using regex patterns:
-
-```go
-hotstatic.Config{
-    CacheRules: []hotstatic.CacheRule{
-        {
-            Pattern:   `\.[a-f0-9]{8}\.(css|js)$`,  // hashed assets
-            MaxAge:    31536000,                     // 1 year
-            Immutable: true,
-        },
-        {
-            Pattern: `\.(png|jpg|jpeg|gif|svg|webp|ico)$`,  // images
-            MaxAge:  86400,                                  // 1 day
-        },
-        {
-            Pattern:        `\.html$`,  // HTML pages
-            MaxAge:         0,          // no-cache
-            MustRevalidate: true,
-        },
-    },
-}
-```
-
-**CacheRule fields:**
-
-| Field | Description |
-|-------|-------------|
-| `Pattern` | Regex to match URL path |
-| `MaxAge` | Cache duration in seconds (0 = no-cache) |
-| `Immutable` | Add `immutable` directive |
-| `MustRevalidate` | Add `must-revalidate` directive |
-| `Private` | Use `private` instead of `public` |
-
-**Result headers:**
-```
-style.a1b2c3d4.css → Cache-Control: public, max-age=31536000, immutable
-logo.png           → Cache-Control: public, max-age=86400
-index.html         → Cache-Control: public, no-cache, must-revalidate
-```
-
-Rules are checked in order — first match wins. ETag is generated automatically for all files using xxHash.
-
-## HTTP API
-
-```go
-handler := hotstatic.NewHTTPHandler(hs.HotStatic)
-http.ListenAndServe(":8080", handler.Router())
-```
-
-### Endpoints
-
-| Method | URL | Description |
-|--------|-----|-------------|
-| POST | `/api/events` | Emit event |
-| POST | `/api/events/batch` | Emit multiple events |
-| POST | `/api/build` | Rebuild a page |
-| GET | `/api/stats` | Statistics |
-| GET | `/api/pages` | List pages |
-| GET | `/api/pages/{path}` | Page info |
-| DELETE | `/api/pages/{path}` | Delete page |
-| GET | `/api/health` | Health check |
-
-### Examples
-
-**Emit event:**
-```bash
-curl -X POST http://localhost:8080/api/events \
-  -H "Content-Type: application/json" \
-  -d '{
-    "type": "product",
-    "id": "123",
-    "action": "updated",
-    "payload": {
-      "product": {"id": "123", "name": "iPhone", "price": 999}
-    }
-  }'
-```
-
-**Rebuild page:**
-```bash
-curl -X POST http://localhost:8080/api/build \
-  -H "Content-Type: application/json" \
-  -d '{
-    "path": "/products/123.html",
-    "payload": {
-      "product": {"id": "123", "name": "iPhone", "price": 999}
-    }
-  }'
-```
-
-**Statistics:**
-```bash
-curl http://localhost:8080/api/stats
-```
-
-```json
-{
-  "pages_total": 15420,
-  "pages_built": 342,
-  "pages_failed": 2,
-  "events_processed": 1893,
-  "queue_length": 12,
-  "workers_active": 4,
-  "uptime": "2h15m30s"
-}
-```
-
-## Webhook
-
-```go
-webhook := hotstatic.NewWebhook(hs.HotStatic, "secret-token")
-http.Handle("/webhook", webhook.Handler())
-```
-
-```bash
-curl -X POST http://localhost:8080/webhook \
-  -H "Authorization: Bearer secret-token" \
-  -H "Content-Type: application/json" \
-  -d '{"type": "product", "id": "123", "action": "updated"}'
-```
-
-## Client-side Router (SPA-like Navigation)
-
-HotStatic includes a JavaScript router for smooth transitions between static pages.
-
-### Setup
-
-```html
-<script>
-window.HotStaticConfig = {
-    contentSelector: 'main',
-    progressBar: {
-        enabled: true,
-        color: '#3b82f6',
-        height: '3px',
-        position: 'top',
-    },
-    prefetch: {
-        enabled: true,
-        on: 'hover',  // 'hover' | 'visible' | 'both'
-        delay: 100,
-    },
-    cache: {
-        enabled: true,
-        maxPages: 20,
-        ttl: 300,  // seconds
-    },
-    navigation: {
-        transition: 'fade',  // 'fade' | 'slide' | 'none'
-        duration: 150,
-    },
-};
-</script>
-<script src="/static/js/router.js"></script>
-```
-
-### Events
-
-```js
-// Before navigation (cancelable)
-document.addEventListener('hs:beforeNavigate', (e) => {
-    console.log('Leaving:', e.detail.from);
-    console.log('Going to:', e.detail.to);
-    // e.preventDefault(); // cancel navigation
-});
-
-// After navigation
-document.addEventListener('hs:afterNavigate', (e) => {
-    console.log('Navigated to:', e.detail.to);
-    window.scrollTo(0, 0); // scroll to top if needed
-});
-
-// Page prefetched
-document.addEventListener('hs:prefetch', (e) => {
-    console.log('Prefetched:', e.detail.url);
-});
-```
-
-### JavaScript API
-
-```js
-HotStatic.navigate('/products/1.html');  // navigate
-HotStatic.prefetch('/about.html');        // prefetch
-HotStatic.clearCache();                   // clear cache
-HotStatic.getCachedUrls();                // get cached URLs
-HotStatic.getConfig();                    // get current config
-```
-
-### Ignore Link
-
-```html
-<a href="/external" data-hs-ignore>Normal navigation</a>
 ```
 
 ## Project Structure
@@ -653,20 +423,11 @@ my-site/
 ├── main.go
 ├── templates/
 │   ├── layouts/
-│   │   └── base.html
-│   ├── components/
-│   │   ├── header.html
-│   │   ├── product-card.html
-│   │   └── breadcrumb.html
+│   │   └── base.jinja2
 │   └── pages/
-│       ├── home.html
-│       ├── product.html
-│       └── category.html
-├── static/
-│   ├── js/
-│   │   └── router.js
-│   └── css/
-│       └── style.css
+│       ├── home.jinja2
+│       ├── product.jinja2
+│       └── category.jinja2
 └── dist/                  # generated HTML files
     ├── index.html
     ├── products/
@@ -676,81 +437,13 @@ my-site/
         └── phones.html
 ```
 
-## Example: Classifieds Site
+## Example
 
-```go
-// Define builder
-hs.SetBuilder(func(ctx context.Context, b *hotstatic.PageBuilder) error {
-    // Static pages
-    b.Page("pages/404.jinja2", "/404.html", nil)
-    b.Page("pages/about.jinja2", "/about.html", nil)
-
-    // All ads
-    ads := getAds()
-    for _, ad := range ads {
-        b.Page("pages/ad.jinja2", "/ads/"+ad.ID+".html", map[string]any{
-            "ad":       ad,
-            "seller":   getSeller(ad.SellerID),
-            "category": getCategory(ad.CategoryID),
-        }).DependsOn("ad:"+ad.ID, "seller:"+ad.SellerID)
-    }
-
-    // Categories
-    categories := getCategories()
-    for _, cat := range categories {
-        b.Page("pages/category.jinja2", "/categories/"+cat.ID+".html", map[string]any{
-            "category": cat,
-            "ads":      getAdsByCategory(cat.ID),
-        }).DependsOn("category:"+cat.ID)
-    }
-
-    return nil
-})
-
-// Build at startup
-hs.BuildAll(ctx)
-
-// Start dev mode (watch for template changes)
-hs.StartDevMode(ctx)
-
-// Start workers
-hs.Start()
-
-// When ad is updated
-func onAdUpdated(ad Ad) {
-    hs.EmitWithPayload("ad:"+ad.ID, "updated", map[string]any{
-        "ad":       ad,
-        "seller":   getSeller(ad.SellerID),
-        "category": getCategory(ad.CategoryID),
-    })
-}
-
-// When seller changes name → all their ads rebuild
-func onSellerUpdated(seller Seller) {
-    ads := getAdsBySeller(seller.ID)
-    for _, ad := range ads {
-        hs.EmitWithPayload("ad:"+ad.ID, "updated", map[string]any{
-            "ad":       ad,
-            "seller":   seller,
-            "category": getCategory(ad.CategoryID),
-        })
-    }
-}
-```
-
-## Running the Example
+See [examples/pongo](examples/pongo) for a complete example.
 
 ```bash
 cd examples/pongo
-
-# Start Redis
-redis-server
-
-# Run example
 go run main.go
-
-# Open in browser
-open http://localhost:8080
 ```
 
 ## License

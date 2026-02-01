@@ -19,106 +19,138 @@ type Event struct {
 	// Timestamp when the event occurred
 	Timestamp time.Time `json:"timestamp"`
 
-	// Priority for rebuild queue (higher = more urgent)
-	Priority int `json:"priority"`
-
-	// Payload contains the entity data for template rendering.
-	// This data is passed directly to the template.
-	Payload map[string]any `json:"payload,omitempty"`
-
-	// Metadata for additional context (not passed to template)
+	// Metadata for additional context
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
-// HasPayload returns true if the event contains payload data.
-func (e Event) HasPayload() bool {
-	return len(e.Payload) > 0
-}
-
-// Key returns the subscription key for this event (e.g., "product:123")
+// Key returns the event key (e.g., "product:123")
 func (e Event) Key() string {
+	if e.ID == "" {
+		return e.Type
+	}
 	return e.Type + ":" + e.ID
 }
 
-// Page represents a static page that can be rebuilt.
-type Page struct {
-	// Path is the output file path (e.g., "/products/123.html")
-	Path string `json:"path"`
+// TemplateDef defines a template and how to load data for it.
+type TemplateDef struct {
+	// File is the template file path relative to TemplateDir (e.g., "pages/product.jinja2")
+	File string
 
-	// Template name to use for rendering
-	Template string `json:"template"`
+	// Output is the path pattern for generated pages (e.g., "/products/{id}.html")
+	Output string
 
-	// Dependencies are entity keys this page depends on (e.g., ["product:123", "brand:apple"])
-	Dependencies []string `json:"dependencies"`
+	// Load fetches data for a single page by ID.
+	// Returns nil to skip (e.g., deleted or inactive entity).
+	Load func(ctx context.Context, id string) (map[string]any, error)
 
-	// Params extracted from path pattern
-	Params map[string]string `json:"params"`
-
-	// LastBuilt timestamp
-	LastBuilt time.Time `json:"last_built"`
-
-	// Hash of last build content for change detection
-	ContentHash string `json:"content_hash,omitempty"`
+	// LoadAll returns all IDs for initial BuildAll.
+	// Called once at startup to build all pages of this template.
+	LoadAll func(ctx context.Context) ([]string, error)
 }
 
-// PageConfig defines how to generate pages of a certain type.
-type PageConfig struct {
-	// Name identifies this page config
-	Name string
+// EventHandler is called when an event is received.
+// The handler decides what pages to build/delete based on the event.
+type EventHandler func(ctx context.Context, event Event) error
 
-	// PathPattern with placeholders (e.g., "/products/{id}.html")
-	PathPattern string
-
-	// Template file or name
+// BuildJob represents a page build task in the queue.
+type BuildJob struct {
+	// Template name (e.g., "product")
 	Template string
 
-	// Priority for rebuild queue (default: 0)
+	// ID of the entity (e.g., "123")
+	ID string
+
+	// Priority for queue ordering (higher = more urgent)
 	Priority int
+
+	// Timestamp when job was created
+	CreatedAt time.Time
+}
+
+// Key returns unique key for this job (for deduplication).
+func (j BuildJob) Key() string {
+	if j.ID == "" {
+		return j.Template
+	}
+	return j.Template + ":" + j.ID
 }
 
 // BuildResult represents the outcome of building a page.
 type BuildResult struct {
-	Page      Page          `json:"page"`
-	Success   bool          `json:"success"`
-	Error     string        `json:"error,omitempty"`
-	Duration  time.Duration `json:"duration"`
-	Changed   bool          `json:"changed"`
-	Timestamp time.Time     `json:"timestamp"`
+	// Template name
+	Template string `json:"template"`
+
+	// ID of the entity
+	ID string `json:"id"`
+
+	// Output path
+	Output string `json:"output"`
+
+	// Success indicates if build succeeded
+	Success bool `json:"success"`
+
+	// Error message if failed
+	Error string `json:"error,omitempty"`
+
+	// Duration of the build
+	Duration time.Duration `json:"duration"`
+
+	// Changed indicates if content changed from previous build
+	Changed bool `json:"changed"`
+
+	// Timestamp when build completed
+	Timestamp time.Time `json:"timestamp"`
 }
 
 // Stats provides runtime statistics.
 type Stats struct {
-	PagesTotal      int64         `json:"pages_total"`
-	PagesBuilt      int64         `json:"pages_built"`
-	PagesFailed     int64         `json:"pages_failed"`
-	EventsProcessed int64         `json:"events_processed"`
-	QueueLength     int64         `json:"queue_length"`
-	WorkersActive   int           `json:"workers_active"`
-	Uptime          time.Duration `json:"uptime"`
+	// TemplatesCount is the number of defined templates
+	TemplatesCount int `json:"templates_count"`
+
+	// PagesBuilt is total pages built since startup
+	PagesBuilt int64 `json:"pages_built"`
+
+	// PagesFailed is total failed builds since startup
+	PagesFailed int64 `json:"pages_failed"`
+
+	// EventsProcessed is total events processed since startup
+	EventsProcessed int64 `json:"events_processed"`
+
+	// QueueLength is current number of jobs in queue
+	QueueLength int `json:"queue_length"`
+
+	// WorkersActive is number of currently active workers
+	WorkersActive int `json:"workers_active"`
+
+	// Uptime since Start() was called
+	Uptime time.Duration `json:"uptime"`
 }
 
-// Dependency links a page to an entity key.
-type Dependency struct {
-	Key      string `json:"key"`       // e.g., "product:123"
-	PagePath string `json:"page_path"` // e.g., "/products/123.html"
+// Config for HotStatic.
+type Config struct {
+	// TemplateDir for template files
+	TemplateDir string
+
+	// OutputDir for generated HTML files
+	OutputDir string
+
+	// Workers count for parallel building (default: 4)
+	Workers int
+
+	// Debounce duration - same page won't rebuild more than once per this duration (default: 1s)
+	Debounce time.Duration
+
+	// DevMode enables file watching and auto-rebuild
+	DevMode bool
+
+	// Logger instance (optional)
+	Logger Logger
 }
 
-// PageData is returned by a Resolver function.
-// It contains everything needed to build a page from an event.
-type PageData struct {
-	// Template file path (e.g., "pages/product.jinja2")
-	Template string
-
-	// Output path (e.g., "/products/123.html")
-	Output string
-
-	// Data passed to the template
-	Data map[string]any
-
-	// Dependencies - entity keys this page depends on
-	Dependencies []string
+// Logger interface for logging.
+type Logger interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
 }
-
-// ResolverFunc transforms an event into PageData for rendering.
-// Called when an event is received to determine what page to build and with what data.
-type ResolverFunc func(ctx context.Context, event Event) (*PageData, error)
