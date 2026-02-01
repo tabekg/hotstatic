@@ -15,7 +15,29 @@ type HotStatic struct {
 	config    Config
 	templates map[string]*TemplateDef
 	builder   Builder
-	mu        sync.RWMutex
+
+	// Queue and workers
+	queue     chan buildJob
+	pending   map[string]time.Time // for debounce
+	pendingMu sync.Mutex
+	wg        sync.WaitGroup
+	ctx       context.Context
+	cancel    context.CancelFunc
+	started   bool
+
+	mu sync.RWMutex
+}
+
+type buildJob struct {
+	template string
+	id       string
+}
+
+func (j buildJob) key() string {
+	if j.id == "" {
+		return j.template
+	}
+	return j.template + ":" + j.id
 }
 
 // Builder interface for template rendering.
@@ -28,13 +50,25 @@ func New(cfg Config) *HotStatic {
 	if cfg.OutputDir == "" {
 		cfg.OutputDir = "./dist"
 	}
+	if cfg.Workers <= 0 {
+		cfg.Workers = 4
+	}
+	if cfg.Debounce <= 0 {
+		cfg.Debounce = time.Second
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = &slogAdapter{slog.Default()}
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+
 	return &HotStatic{
 		config:    cfg,
 		templates: make(map[string]*TemplateDef),
+		queue:     make(chan buildJob, 10000),
+		pending:   make(map[string]time.Time),
+		ctx:       ctx,
+		cancel:    cancel,
 	}
 }
 
@@ -52,8 +86,155 @@ func (hs *HotStatic) SetBuilder(builder Builder) {
 	hs.builder = builder
 }
 
-// Build builds a single page.
+// Build builds a single page synchronously.
 func (hs *HotStatic) Build(ctx context.Context, template string, id string) error {
+	return hs.buildPage(ctx, template, id)
+}
+
+// Queue adds a page to the build queue (async, with debounce).
+// Call Start() first to start workers.
+func (hs *HotStatic) Queue(template string, id string) {
+	job := buildJob{template: template, id: id}
+	key := job.key()
+
+	hs.pendingMu.Lock()
+	lastQueued, exists := hs.pending[key]
+	now := time.Now()
+
+	// Debounce: skip if same page was queued recently
+	if exists && now.Sub(lastQueued) < hs.config.Debounce {
+		hs.pendingMu.Unlock()
+		hs.config.Logger.Debug("debounced", "template", template, "id", id)
+		return
+	}
+
+	hs.pending[key] = now
+	hs.pendingMu.Unlock()
+
+	// Non-blocking send to queue
+	select {
+	case hs.queue <- job:
+	default:
+		hs.config.Logger.Warn("queue full, dropping job", "template", template, "id", id)
+	}
+}
+
+// Start starts workers for processing the queue.
+func (hs *HotStatic) Start() {
+	hs.mu.Lock()
+	if hs.started {
+		hs.mu.Unlock()
+		return
+	}
+	hs.started = true
+	hs.mu.Unlock()
+
+	for i := 0; i < hs.config.Workers; i++ {
+		hs.wg.Add(1)
+		go hs.worker()
+	}
+
+	hs.config.Logger.Info("started", "workers", hs.config.Workers, "debounce", hs.config.Debounce)
+}
+
+// Stop stops workers gracefully.
+func (hs *HotStatic) Stop() {
+	hs.cancel()
+	close(hs.queue)
+	hs.wg.Wait()
+	hs.config.Logger.Info("stopped")
+}
+
+func (hs *HotStatic) worker() {
+	defer hs.wg.Done()
+
+	for job := range hs.queue {
+		select {
+		case <-hs.ctx.Done():
+			return
+		default:
+		}
+
+		if err := hs.buildPage(hs.ctx, job.template, job.id); err != nil {
+			hs.config.Logger.Error("build failed",
+				"template", job.template,
+				"id", job.id,
+				"error", err.Error(),
+			)
+		}
+
+		// Clear from pending
+		hs.pendingMu.Lock()
+		delete(hs.pending, job.key())
+		hs.pendingMu.Unlock()
+	}
+}
+
+// BuildAll builds all pages for all templates.
+func (hs *HotStatic) BuildAll(ctx context.Context) error {
+	start := time.Now()
+
+	hs.mu.RLock()
+	templates := make(map[string]*TemplateDef)
+	for k, v := range hs.templates {
+		templates[k] = v
+	}
+	hs.mu.RUnlock()
+
+	var totalPages int
+
+	for name, def := range templates {
+		if def.LoadAll == nil {
+			continue
+		}
+
+		ids, err := def.LoadAll(ctx)
+		if err != nil {
+			return fmt.Errorf("LoadAll for %s: %w", name, err)
+		}
+
+		hs.config.Logger.Info("building template", "template", name, "count", len(ids))
+
+		for _, id := range ids {
+			if err := hs.buildPage(ctx, name, id); err != nil {
+				hs.config.Logger.Error("build failed",
+					"template", name,
+					"id", id,
+					"error", err.Error(),
+				)
+			} else {
+				totalPages++
+			}
+		}
+	}
+
+	hs.config.Logger.Info("build complete", "pages", totalPages, "duration", time.Since(start))
+
+	return nil
+}
+
+// Delete removes a generated page by path.
+func (hs *HotStatic) Delete(path string) error {
+	fullPath := filepath.Join(hs.config.OutputDir, path)
+
+	if err := os.Remove(fullPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	hs.config.Logger.Info("deleted page", "path", path)
+
+	return nil
+}
+
+// GetTemplate returns a template definition by name.
+func (hs *HotStatic) GetTemplate(name string) (*TemplateDef, bool) {
+	hs.mu.RLock()
+	defer hs.mu.RUnlock()
+	def, ok := hs.templates[name]
+	return def, ok
+}
+
+func (hs *HotStatic) buildPage(ctx context.Context, template string, id string) error {
 	start := time.Now()
 
 	hs.mu.RLock()
@@ -80,11 +261,7 @@ func (hs *HotStatic) Build(ctx context.Context, template string, id string) erro
 	}
 
 	if pageData == nil {
-		// nil means skip (e.g., deleted or inactive entity)
-		hs.config.Logger.Debug("skipped (no data)",
-			"template", template,
-			"id", id,
-		)
+		hs.config.Logger.Debug("skipped (no data)", "template", template, "id", id)
 		return nil
 	}
 
@@ -103,93 +280,12 @@ func (hs *HotStatic) Build(ctx context.Context, template string, id string) erro
 	return nil
 }
 
-// BuildAll builds all pages for all templates.
-func (hs *HotStatic) BuildAll(ctx context.Context) error {
-	start := time.Now()
-
-	hs.mu.RLock()
-	templates := make(map[string]*TemplateDef)
-	for k, v := range hs.templates {
-		templates[k] = v
-	}
-	hs.mu.RUnlock()
-
-	var totalPages int
-
-	for name, def := range templates {
-		if def.LoadAll == nil {
-			continue
-		}
-
-		ids, err := def.LoadAll(ctx)
-		if err != nil {
-			return fmt.Errorf("LoadAll for %s: %w", name, err)
-		}
-
-		hs.config.Logger.Info("building template",
-			"template", name,
-			"count", len(ids),
-		)
-
-		for _, id := range ids {
-			if err := hs.Build(ctx, name, id); err != nil {
-				hs.config.Logger.Error("build failed",
-					"template", name,
-					"id", id,
-					"error", err.Error(),
-				)
-			} else {
-				totalPages++
-			}
-		}
-	}
-
-	hs.config.Logger.Info("build complete",
-		"pages", totalPages,
-		"duration", time.Since(start),
-	)
-
-	return nil
-}
-
-// Delete removes a generated page by path.
-func (hs *HotStatic) Delete(path string) error {
-	fullPath := filepath.Join(hs.config.OutputDir, path)
-
-	if err := os.Remove(fullPath); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-
-	hs.config.Logger.Info("deleted page", "path", path)
-
-	return nil
-}
-
-// GetTemplate returns a template definition by name.
-func (hs *HotStatic) GetTemplate(name string) (*TemplateDef, bool) {
-	hs.mu.RLock()
-	defer hs.mu.RUnlock()
-	def, ok := hs.templates[name]
-	return def, ok
-}
-
 // slogAdapter wraps slog.Logger to implement Logger interface.
 type slogAdapter struct {
 	*slog.Logger
 }
 
-func (s *slogAdapter) Debug(msg string, args ...any) {
-	s.Logger.Debug(msg, args...)
-}
-
-func (s *slogAdapter) Info(msg string, args ...any) {
-	s.Logger.Info(msg, args...)
-}
-
-func (s *slogAdapter) Warn(msg string, args ...any) {
-	s.Logger.Warn(msg, args...)
-}
-
-func (s *slogAdapter) Error(msg string, args ...any) {
-	s.Logger.Error(msg, args...)
-}
+func (s *slogAdapter) Debug(msg string, args ...any) { s.Logger.Debug(msg, args...) }
+func (s *slogAdapter) Info(msg string, args ...any)  { s.Logger.Info(msg, args...) }
+func (s *slogAdapter) Warn(msg string, args ...any)  { s.Logger.Warn(msg, args...) }
+func (s *slogAdapter) Error(msg string, args ...any) { s.Logger.Error(msg, args...) }

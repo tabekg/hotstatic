@@ -1,6 +1,9 @@
 package hotstatic
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // PageData contains data for rendering a page and its output path.
 type PageData struct {
@@ -33,6 +36,12 @@ type Config struct {
 
 	// OutputDir for generated HTML files
 	OutputDir string
+
+	// Workers count for parallel building (default: 4)
+	Workers int
+
+	// Debounce duration - same page won't rebuild more than once per this duration (default: 1s)
+	Debounce time.Duration
 
 	// Logger instance (optional)
 	Logger Logger

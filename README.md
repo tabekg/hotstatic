@@ -69,7 +69,9 @@ Creates HotStatic with pongo2/jinja2 template support:
 hs, err := hotstatic.NewWithPongo(hotstatic.Config{
     TemplateDir: "./templates",
     OutputDir:   "./dist",
-    Logger:      myLogger, // optional
+    Workers:     4,              // parallel workers (default: 4)
+    Debounce:    time.Second,    // debounce duration (default: 1s)
+    Logger:      myLogger,       // optional
 })
 ```
 
@@ -104,10 +106,31 @@ hs.DefineTemplate("product", hotstatic.TemplateDef{
 
 ### Build
 
-Build a single page:
+Build a single page synchronously:
 
 ```go
 err := hs.Build(ctx, "product", "123")
+```
+
+### Queue
+
+Add page to build queue (async, with debounce):
+
+```go
+hs.Queue("product", "123")
+hs.Queue("product", "123") // debounced, won't build twice
+```
+
+### Start / Stop
+
+Start and stop workers for queue processing:
+
+```go
+hs.Start()
+defer hs.Stop()
+
+// Now Queue() will be processed by workers
+hs.Queue("product", "123")
 ```
 
 ### BuildAll
