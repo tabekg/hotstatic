@@ -79,17 +79,17 @@ func (ths *TemplHotStatic) GenerateTemplPage(ctx context.Context, configName str
 		return fmt.Errorf("templ build %s: %w", page.Path, err)
 	}
 
-	// Subscribe page
-	err = ths.registry.Subscribe(ctx, registry.PageMeta{
-		Path:          page.Path,
-		Template:      "templ:" + configName,
-		Params:        page.Params,
-		Subscriptions: page.Subscriptions,
-		LastBuilt:     time.Now(),
-		ContentHash:   result.ContentHash,
+	// Register page dependencies
+	err = ths.registry.AddDependencies(ctx, registry.PageMeta{
+		Path:         page.Path,
+		Template:     "templ:" + configName,
+		Params:       page.Params,
+		Dependencies: page.Dependencies,
+		LastBuilt:    time.Now(),
+		ContentHash:  result.ContentHash,
 	})
 	if err != nil {
-		return fmt.Errorf("subscribe %s: %w", page.Path, err)
+		return fmt.Errorf("add dependencies %s: %w", page.Path, err)
 	}
 
 	return nil
@@ -146,12 +146,12 @@ func (ths *TemplHotStatic) BuildTemplPage(ctx context.Context, pagePath string, 
 
 	return &BuildResult{
 		Page: Page{
-			Path:          meta.Path,
-			Template:      meta.Template,
-			Subscriptions: meta.Subscriptions,
-			Params:        meta.Params,
-			LastBuilt:     time.Now(),
-			ContentHash:   result.ContentHash,
+			Path:         meta.Path,
+			Template:     meta.Template,
+			Dependencies: meta.Dependencies,
+			Params:       meta.Params,
+			LastBuilt:    time.Now(),
+			ContentHash:  result.ContentHash,
 		},
 		Success:   true,
 		Duration:  time.Since(start),

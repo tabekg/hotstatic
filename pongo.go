@@ -84,7 +84,7 @@ func (pb *PageBuilder) Page(template, output string, data map[string]any) *PageB
 	return pbr
 }
 
-// PageBuildResult allows chaining Subscribe calls.
+// PageBuildResult allows chaining DependsOn calls.
 type PageBuildResult struct {
 	phs         *PongoHotStatic
 	ctx         context.Context
@@ -94,22 +94,22 @@ type PageBuildResult struct {
 	err         error
 }
 
-// Subscribe registers subscriptions for this page.
-// When events matching these keys are emitted, the page will be rebuilt.
-func (pbr *PageBuildResult) Subscribe(keys ...string) *PageBuildResult {
+// DependsOn registers dependencies for this page.
+// When events matching these entity keys are emitted, the page will be rebuilt.
+func (pbr *PageBuildResult) DependsOn(keys ...string) *PageBuildResult {
 	if pbr.err != nil {
 		return pbr
 	}
 
-	err := pbr.phs.registry.Subscribe(pbr.ctx, registry.PageMeta{
-		Path:          pbr.output,
-		Template:      "pongo:" + pbr.template,
-		Subscriptions: keys,
-		LastBuilt:     time.Now(),
-		ContentHash:   pbr.contentHash,
+	err := pbr.phs.registry.AddDependencies(pbr.ctx, registry.PageMeta{
+		Path:         pbr.output,
+		Template:     "pongo:" + pbr.template,
+		Dependencies: keys,
+		LastBuilt:    time.Now(),
+		ContentHash:  pbr.contentHash,
 	})
 	if err != nil {
-		pbr.phs.logger.Error("subscribe failed",
+		pbr.phs.logger.Error("add dependencies failed",
 			slog.String("output", pbr.output),
 			slog.String("error", err.Error()),
 		)
@@ -196,17 +196,17 @@ func (phs *PongoHotStatic) GeneratePongoPage(ctx context.Context, page Page, dat
 		return fmt.Errorf("pongo build %s: %w", page.Path, err)
 	}
 
-	// Subscribe page
-	err = phs.registry.Subscribe(ctx, registry.PageMeta{
-		Path:          page.Path,
-		Template:      "pongo:" + templateName,
-		Params:        page.Params,
-		Subscriptions: page.Subscriptions,
-		LastBuilt:     time.Now(),
-		ContentHash:   result.ContentHash,
+	// Register page dependencies
+	err = phs.registry.AddDependencies(ctx, registry.PageMeta{
+		Path:         page.Path,
+		Template:     "pongo:" + templateName,
+		Params:       page.Params,
+		Dependencies: page.Dependencies,
+		LastBuilt:    time.Now(),
+		ContentHash:  result.ContentHash,
 	})
 	if err != nil {
-		return fmt.Errorf("subscribe %s: %w", page.Path, err)
+		return fmt.Errorf("add dependencies %s: %w", page.Path, err)
 	}
 
 	return nil
@@ -252,12 +252,12 @@ func (phs *PongoHotStatic) BuildPongoPage(ctx context.Context, pagePath string, 
 
 	return &BuildResult{
 		Page: Page{
-			Path:          meta.Path,
-			Template:      meta.Template,
-			Subscriptions: meta.Subscriptions,
-			Params:        meta.Params,
-			LastBuilt:     time.Now(),
-			ContentHash:   result.ContentHash,
+			Path:         meta.Path,
+			Template:     meta.Template,
+			Dependencies: meta.Dependencies,
+			Params:       meta.Params,
+			LastBuilt:    time.Now(),
+			ContentHash:  result.ContentHash,
 		},
 		Success:   true,
 		Duration:  time.Since(start),

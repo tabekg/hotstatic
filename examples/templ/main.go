@@ -107,15 +107,15 @@ func main() {
 
 	// Generate product pages
 	for id, product := range products {
-		subs := []string{
+		deps := []string{
 			"product:" + product.ID,
 			"brand:" + product.BrandID,
 			"category:" + product.CategoryID,
 		}
 		err := hs.GenerateTemplPage(ctx, "product-detail", hotstatic.Page{
-			Path:          "/products/" + id + ".html",
-			Subscriptions: subs,
-			Params:        map[string]string{"id": id},
+			Path:         "/products/" + id + ".html",
+			Dependencies: deps,
+			Params:       map[string]string{"id": id},
 		}, product)
 		if err != nil {
 			log.Printf("generate product %s: %v", id, err)
@@ -135,14 +135,14 @@ func main() {
 			Name:     categoryName,
 			Products: categoryProducts,
 		}
-		subs := []string{"category:" + categoryID}
+		deps := []string{"category:" + categoryID}
 		for _, p := range categoryProducts {
-			subs = append(subs, "product:"+p.ID)
+			deps = append(deps, "product:"+p.ID)
 		}
 		err := hs.GenerateTemplPage(ctx, "category-list", hotstatic.Page{
-			Path:          "/categories/" + categoryID + ".html",
-			Subscriptions: subs,
-			Params:        map[string]string{"id": categoryID},
+			Path:         "/categories/" + categoryID + ".html",
+			Dependencies: deps,
+			Params:       map[string]string{"id": categoryID},
 		}, data)
 		if err != nil {
 			log.Printf("generate category %s: %v", categoryID, err)
@@ -150,11 +150,11 @@ func main() {
 	}
 
 	// Generate home page
-	homeData, homeSubs := getHomeData()
+	homeData, homeDeps := getHomeData()
 	err = hs.GenerateTemplPage(ctx, "home", hotstatic.Page{
-		Path:          "/index.html",
-		Subscriptions: homeSubs,
-		Params:        map[string]string{},
+		Path:         "/index.html",
+		Dependencies: homeDeps,
+		Params:       map[string]string{},
 	}, homeData)
 	if err != nil {
 		log.Printf("generate home: %v", err)
@@ -285,13 +285,14 @@ func getHomeData() (templates.HomeData, []string) {
 		Categories:       cats,
 	}
 
-	subs := []string{"home:index"}
+	// Home page depends on all products and categories
+	deps := []string{}
 	for _, p := range products {
-		subs = append(subs, "product:"+p.ID)
+		deps = append(deps, "product:"+p.ID)
 	}
 	for id := range categories {
-		subs = append(subs, "category:"+id)
+		deps = append(deps, "category:"+id)
 	}
 
-	return data, subs
+	return data, deps
 }

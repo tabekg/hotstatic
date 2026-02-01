@@ -146,12 +146,17 @@ func main() {
 		// Static pages (no data needed)
 		b.Page("pages/404.jinja2", "/404.html", nil)
 
-		// Home page
+		// Home page - depends on featured products
+		featuredProducts := getFeaturedProducts()
+		homeDeps := make([]string, len(featuredProducts))
+		for i, p := range featuredProducts {
+			homeDeps[i] = "product:" + p.ID
+		}
 		b.Page("pages/home.jinja2", "/index.html", map[string]any{
-			"featured_products": getFeaturedProducts(),
+			"featured_products": featuredProducts,
 			"categories":        getCategories(),
 			"active_nav":        "home",
-		}).Subscribe("home:index")
+		}).DependsOn(homeDeps...)
 
 		// Product pages
 		for id, product := range products {
@@ -163,7 +168,7 @@ func main() {
 					{"label": product.CategoryName, "url": "/categories/" + product.CategoryID + ".html"},
 					{"label": product.Name, "url": ""},
 				},
-			}).Subscribe("product:"+product.ID, "brand:"+product.BrandID)
+			}).DependsOn("product:"+product.ID, "brand:"+product.BrandID)
 		}
 
 		// Category pages
@@ -177,7 +182,7 @@ func main() {
 					{"label": "Home", "url": "/"},
 					{"label": category.Name, "url": ""},
 				},
-			}).Subscribe("category:" + id)
+			}).DependsOn("category:" + id)
 		}
 
 		return nil

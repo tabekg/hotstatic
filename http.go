@@ -67,9 +67,9 @@ func (h *HTTPHandler) handleEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.json(w, map[string]any{
-		"success":     true,
-		"key":         event.Key(),
-		"subscribers": h.getSubscriberCount(event.Key()),
+		"success":    true,
+		"key":        event.Key(),
+		"dependents": h.getDependentCount(event.Key()),
 	})
 }
 
@@ -184,7 +184,7 @@ func (h *HTTPHandler) handleGetPage(w http.ResponseWriter, r *http.Request) {
 func (h *HTTPHandler) handleDeletePage(w http.ResponseWriter, r *http.Request) {
 	path := "/" + r.PathValue("path")
 
-	if err := h.hs.Unsubscribe(r.Context(), path); err != nil {
+	if err := h.hs.RemoveDependencies(r.Context(), path); err != nil {
 		h.jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -249,9 +249,9 @@ func (h *HTTPHandler) jsonError(w http.ResponseWriter, message string, code int)
 	})
 }
 
-func (h *HTTPHandler) getSubscriberCount(key string) int {
-	subs, _ := h.hs.Registry().GetSubscribers(h.hs.ctx, key)
-	return len(subs)
+func (h *HTTPHandler) getDependentCount(key string) int {
+	deps, _ := h.hs.Registry().GetDependents(h.hs.ctx, key)
+	return len(deps)
 }
 
 // CacheRule defines caching behavior for files matching a pattern.

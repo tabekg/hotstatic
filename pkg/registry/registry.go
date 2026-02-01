@@ -11,22 +11,22 @@ import (
 )
 
 const (
-	prefixSubscription = "hs:sub:"  // hs:sub:{key} -> set of page paths
-	prefixPage         = "hs:page:" // hs:page:{path} -> page metadata JSON
-	prefixPageSubs     = "hs:psub:" // hs:psub:{path} -> set of subscription keys
+	prefixDependency = "hs:dep:"  // hs:dep:{key} -> set of page paths
+	prefixPage       = "hs:page:" // hs:page:{path} -> page metadata JSON
+	prefixPageDeps   = "hs:pdep:" // hs:pdep:{path} -> set of dependency keys
 )
 
 // PageMeta stores page metadata.
 type PageMeta struct {
-	Path          string            `json:"path"`
-	Template      string            `json:"template"`
-	Params        map[string]string `json:"params"`
-	Subscriptions []string          `json:"subscriptions"`
-	LastBuilt     time.Time         `json:"last_built"`
-	ContentHash   string            `json:"content_hash,omitempty"`
+	Path         string            `json:"path"`
+	Template     string            `json:"template"`
+	Params       map[string]string `json:"params"`
+	Dependencies []string          `json:"dependencies"`
+	LastBuilt    time.Time         `json:"last_built"`
+	ContentHash  string            `json:"content_hash,omitempty"`
 }
 
-// Registry manages page subscriptions in Redis.
+// Registry manages page dependencies in Redis.
 type Registry struct {
 	client *redis.Client
 	prefix string
@@ -69,8 +69,8 @@ func NewWithClient(client *redis.Client, prefix string) *Registry {
 	}
 }
 
-// Subscribe registers a page for given subscription keys.
-func (r *Registry) Subscribe(ctx context.Context, meta PageMeta) error {
+// AddDependencies registers a page with its dependency keys.
+func (r *Registry) AddDependencies(ctx context.Context, meta PageMeta) error {
 	pipe := r.client.Pipeline()
 
 	pageKey := r.key(prefixPage, meta.Path)
@@ -80,53 +80,53 @@ func (r *Registry) Subscribe(ctx context.Context, meta PageMeta) error {
 	}
 	pipe.Set(ctx, pageKey, metaJSON, 0)
 
-	oldSubsKey := r.key(prefixPageSubs, meta.Path)
-	pipe.Del(ctx, oldSubsKey)
+	oldDepsKey := r.key(prefixPageDeps, meta.Path)
+	pipe.Del(ctx, oldDepsKey)
 
-	for _, subKey := range meta.Subscriptions {
-		pipe.SAdd(ctx, r.key(prefixSubscription, subKey), meta.Path)
-		pipe.SAdd(ctx, oldSubsKey, subKey)
+	for _, depKey := range meta.Dependencies {
+		pipe.SAdd(ctx, r.key(prefixDependency, depKey), meta.Path)
+		pipe.SAdd(ctx, oldDepsKey, depKey)
 	}
 
 	_, err = pipe.Exec(ctx)
 	return err
 }
 
-// Unsubscribe removes a page and all its subscriptions.
-func (r *Registry) Unsubscribe(ctx context.Context, pagePath string) error {
-	subsKey := r.key(prefixPageSubs, pagePath)
-	subs, err := r.client.SMembers(ctx, subsKey).Result()
+// RemoveDependencies removes a page and all its dependencies.
+func (r *Registry) RemoveDependencies(ctx context.Context, pagePath string) error {
+	depsKey := r.key(prefixPageDeps, pagePath)
+	deps, err := r.client.SMembers(ctx, depsKey).Result()
 	if err != nil && err != redis.Nil {
 		return err
 	}
 
 	pipe := r.client.Pipeline()
 
-	for _, subKey := range subs {
-		pipe.SRem(ctx, r.key(prefixSubscription, subKey), pagePath)
+	for _, depKey := range deps {
+		pipe.SRem(ctx, r.key(prefixDependency, depKey), pagePath)
 	}
 
 	pipe.Del(ctx, r.key(prefixPage, pagePath))
-	pipe.Del(ctx, subsKey)
+	pipe.Del(ctx, depsKey)
 
 	_, err = pipe.Exec(ctx)
 	return err
 }
 
-// GetSubscribers returns all page paths subscribed to a key.
-func (r *Registry) GetSubscribers(ctx context.Context, key string) ([]string, error) {
-	return r.client.SMembers(ctx, r.key(prefixSubscription, key)).Result()
+// GetDependents returns all page paths that depend on a key.
+func (r *Registry) GetDependents(ctx context.Context, key string) ([]string, error) {
+	return r.client.SMembers(ctx, r.key(prefixDependency, key)).Result()
 }
 
-// GetSubscribersMulti returns pages subscribed to any of the given keys.
-func (r *Registry) GetSubscribersMulti(ctx context.Context, keys []string) ([]string, error) {
+// GetDependentsMulti returns pages that depend on any of the given keys.
+func (r *Registry) GetDependentsMulti(ctx context.Context, keys []string) ([]string, error) {
 	if len(keys) == 0 {
 		return nil, nil
 	}
 
 	redisKeys := make([]string, len(keys))
 	for i, k := range keys {
-		redisKeys[i] = r.key(prefixSubscription, k)
+		redisKeys[i] = r.key(prefixDependency, k)
 	}
 
 	return r.client.SUnion(ctx, redisKeys...).Result()
@@ -185,16 +185,16 @@ func (r *Registry) ListPages(ctx context.Context) ([]string, error) {
 	return pages, iter.Err()
 }
 
-// ListSubscriptionKeys returns all active subscription keys.
-func (r *Registry) ListSubscriptionKeys(ctx context.Context) ([]string, error) {
-	pattern := r.key(prefixSubscription, "*")
+// ListDependencyKeys returns all active dependency keys.
+func (r *Registry) ListDependencyKeys(ctx context.Context) ([]string, error) {
+	pattern := r.key(prefixDependency, "*")
 	var keys []string
 
 	iter := r.client.Scan(ctx, 0, pattern, 100).Iterator()
 	for iter.Next(ctx) {
 		key := iter.Val()
-		subKey := strings.TrimPrefix(key, r.key(prefixSubscription, ""))
-		keys = append(keys, subKey)
+		depKey := strings.TrimPrefix(key, r.key(prefixDependency, ""))
+		keys = append(keys, depKey)
 	}
 
 	return keys, iter.Err()
@@ -211,12 +211,12 @@ func (r *Registry) Stats(ctx context.Context) (map[string]int64, error) {
 	}
 	stats["pages"] = int64(pageKeys)
 
-	subPattern := r.key(prefixSubscription, "*")
-	subKeys, err := r.scanCount(ctx, subPattern)
+	depPattern := r.key(prefixDependency, "*")
+	depKeys, err := r.scanCount(ctx, depPattern)
 	if err != nil {
 		return nil, err
 	}
-	stats["subscription_keys"] = int64(subKeys)
+	stats["dependency_keys"] = int64(depKeys)
 
 	return stats, nil
 }
@@ -224,9 +224,9 @@ func (r *Registry) Stats(ctx context.Context) (map[string]int64, error) {
 // Clear removes all registry data.
 func (r *Registry) Clear(ctx context.Context) error {
 	patterns := []string{
-		r.key(prefixSubscription, "*"),
+		r.key(prefixDependency, "*"),
 		r.key(prefixPage, "*"),
-		r.key(prefixPageSubs, "*"),
+		r.key(prefixPageDeps, "*"),
 	}
 
 	for _, pattern := range patterns {

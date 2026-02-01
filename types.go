@@ -47,8 +47,8 @@ type Page struct {
 	// Template name to use for rendering
 	Template string `json:"template"`
 
-	// Subscriptions are keys this page depends on (e.g., ["product:123", "brand:apple"])
-	Subscriptions []string `json:"subscriptions"`
+	// Dependencies are entity keys this page depends on (e.g., ["product:123", "brand:apple"])
+	Dependencies []string `json:"dependencies"`
 
 	// Params extracted from path pattern
 	Params map[string]string `json:"params"`
@@ -96,8 +96,8 @@ type Stats struct {
 	Uptime          time.Duration `json:"uptime"`
 }
 
-// Subscription links a page to an event key.
-type Subscription struct {
+// Dependency links a page to an entity key.
+type Dependency struct {
 	Key      string `json:"key"`       // e.g., "product:123"
 	PagePath string `json:"page_path"` // e.g., "/products/123.html"
 }

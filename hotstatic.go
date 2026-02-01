@@ -219,7 +219,7 @@ func (hs *HotStatic) Stop() error {
 	return hs.registry.Close()
 }
 
-// Emit triggers a rebuild for all pages subscribed to the key.
+// Emit triggers a rebuild for all pages that depend on the key.
 func (hs *HotStatic) Emit(key, action string) error {
 	return hs.EmitEvent(Event{
 		Type:      strings.Split(key, ":")[0],
@@ -246,15 +246,15 @@ func (hs *HotStatic) EmitEvent(event Event) error {
 	atomic.AddInt64(&hs.eventsProcessed, 1)
 
 	key := event.Key()
-	pages, err := hs.registry.GetSubscribers(hs.ctx, key)
+	pages, err := hs.registry.GetDependents(hs.ctx, key)
 	if err != nil {
-		return fmt.Errorf("get subscribers for %s: %w", key, err)
+		return fmt.Errorf("get dependents for %s: %w", key, err)
 	}
 
 	hs.logger.Debug("event received",
 		slog.String("key", key),
 		slog.String("action", event.Action),
-		slog.Int("subscribers", len(pages)),
+		slog.Int("dependents", len(pages)),
 		slog.Bool("has_payload", event.HasPayload()),
 	)
 
@@ -272,7 +272,7 @@ func (hs *HotStatic) EmitEvent(event Event) error {
 
 // EmitMulti triggers rebuilds for multiple keys.
 func (hs *HotStatic) EmitMulti(keys []string, action string) error {
-	pages, err := hs.registry.GetSubscribersMulti(hs.ctx, keys)
+	pages, err := hs.registry.GetDependentsMulti(hs.ctx, keys)
 	if err != nil {
 		return err
 	}
@@ -305,29 +305,29 @@ func (hs *HotStatic) ListPages(ctx context.Context) ([]string, error) {
 	return hs.registry.ListPages(ctx)
 }
 
-// Subscribe registers a page with subscriptions.
-func (hs *HotStatic) Subscribe(ctx context.Context, page Page) error {
-	return hs.registry.Subscribe(ctx, registry.PageMeta{
-		Path:          page.Path,
-		Template:      page.Template,
-		Params:        page.Params,
-		Subscriptions: page.Subscriptions,
-		LastBuilt:     page.LastBuilt,
-		ContentHash:   page.ContentHash,
+// AddDependencies registers a page with its dependencies.
+func (hs *HotStatic) AddDependencies(ctx context.Context, page Page) error {
+	return hs.registry.AddDependencies(ctx, registry.PageMeta{
+		Path:         page.Path,
+		Template:     page.Template,
+		Params:       page.Params,
+		Dependencies: page.Dependencies,
+		LastBuilt:    page.LastBuilt,
+		ContentHash:  page.ContentHash,
 	})
 }
 
-// Unsubscribe removes a page.
-func (hs *HotStatic) Unsubscribe(ctx context.Context, pagePath string) error {
-	return hs.registry.Unsubscribe(ctx, pagePath)
+// RemoveDependencies removes a page and its dependencies.
+func (hs *HotStatic) RemoveDependencies(ctx context.Context, pagePath string) error {
+	return hs.registry.RemoveDependencies(ctx, pagePath)
 }
 
-// GeneratePage creates a single page with the given data and subscriptions.
+// GeneratePage creates a single page with the given data and dependencies.
 func (hs *HotStatic) GeneratePage(ctx context.Context, page Page, data map[string]any) error {
-	// Subscribe page
-	err := hs.Subscribe(ctx, page)
+	// Register page dependencies
+	err := hs.AddDependencies(ctx, page)
 	if err != nil {
-		return fmt.Errorf("subscribe %s: %w", page.Path, err)
+		return fmt.Errorf("add dependencies %s: %w", page.Path, err)
 	}
 
 	// Build immediately
@@ -444,12 +444,12 @@ func (hs *HotStatic) buildPageWithPayload(ctx context.Context, meta *registry.Pa
 
 	return &BuildResult{
 		Page: Page{
-			Path:          meta.Path,
-			Template:      meta.Template,
-			Subscriptions: meta.Subscriptions,
-			Params:        meta.Params,
-			LastBuilt:     time.Now(),
-			ContentHash:   result.ContentHash,
+			Path:         meta.Path,
+			Template:     meta.Template,
+			Dependencies: meta.Dependencies,
+			Params:       meta.Params,
+			LastBuilt:    time.Now(),
+			ContentHash:  result.ContentHash,
 		},
 		Success:   true,
 		Duration:  time.Since(start),

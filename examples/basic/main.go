@@ -90,16 +90,16 @@ func main() {
 			"Category":    categories[product.CategoryID],
 			"GeneratedAt": time.Now().Format(time.RFC3339),
 		}
-		subscriptions := []string{
+		dependencies := []string{
 			"product:" + product.ID,
 			"brand:" + product.BrandID,
 			"category:" + product.CategoryID,
 		}
 		err := hs.GeneratePage(ctx, hotstatic.Page{
-			Path:          "/products/" + id + ".html",
-			Template:      "product-detail",
-			Subscriptions: subscriptions,
-			Params:        map[string]string{"id": id},
+			Path:         "/products/" + id + ".html",
+			Template:     "product-detail",
+			Dependencies: dependencies,
+			Params:       map[string]string{"id": id},
 		}, data)
 		if err != nil {
 			log.Printf("generate product %s: %v", id, err)
@@ -120,15 +120,15 @@ func main() {
 			"Products":     categoryProducts,
 			"GeneratedAt":  time.Now().Format(time.RFC3339),
 		}
-		subs := []string{"category:" + categoryID}
+		deps := []string{"category:" + categoryID}
 		for _, p := range categoryProducts {
-			subs = append(subs, "product:"+p.ID)
+			deps = append(deps, "product:"+p.ID)
 		}
 		err := hs.GeneratePage(ctx, hotstatic.Page{
-			Path:          "/categories/" + categoryID + ".html",
-			Template:      "category-list",
-			Subscriptions: subs,
-			Params:        map[string]string{"id": categoryID},
+			Path:         "/categories/" + categoryID + ".html",
+			Template:     "category-list",
+			Dependencies: deps,
+			Params:       map[string]string{"id": categoryID},
 		}, data)
 		if err != nil {
 			log.Printf("generate category %s: %v", categoryID, err)

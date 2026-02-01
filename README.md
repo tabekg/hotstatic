@@ -64,7 +64,7 @@ func main() {
         for _, p := range products {
             b.Page("pages/product.jinja2", "/products/"+p.ID+".html", map[string]any{
                 "product": p,
-            }).Subscribe("product:"+p.ID, "brand:"+p.BrandID)
+            }).DependsOn("product:"+p.ID, "brand:"+p.BrandID)
         }
 
         categories := getCategories()
@@ -72,7 +72,7 @@ func main() {
             b.Page("pages/category.jinja2", "/categories/"+c.ID+".html", map[string]any{
                 "category": c,
                 "products": getProductsByCategory(c.ID),
-            }).Subscribe("category:"+c.ID)
+            }).DependsOn("category:"+c.ID)
         }
 
         return nil
@@ -163,10 +163,10 @@ hs.SetBuilder(func(ctx context.Context, b *hotstatic.PageBuilder) error {
         "product": product,
     })
 
-    // Page with data and subscriptions (for event-driven rebuilds)
+    // Page with data and dependencies (for event-driven rebuilds)
     b.Page("pages/product.jinja2", "/products/1.html", map[string]any{
         "product": product,
-    }).Subscribe("product:1", "brand:apple")
+    }).DependsOn("product:1", "brand:apple")
 
     return nil
 })
@@ -219,7 +219,7 @@ hs.EmitWithPayload("product:123", "updated", map[string]any{
     "brand":   brand,
 })
 
-// All pages subscribed to "product:123" will rebuild
+// All pages that depend on "product:123" will rebuild
 ```
 
 ### Event with Priority
@@ -246,7 +246,7 @@ pages, err := hs.ListPages(ctx)
 ### Delete Page
 
 ```go
-err := hs.Unsubscribe(ctx, "/products/123.html")
+err := hs.RemoveDependencies(ctx, "/products/123.html")
 ```
 
 ## Templates (Pongo2 / Django / Jinja2)
@@ -636,7 +636,7 @@ hs.SetBuilder(func(ctx context.Context, b *hotstatic.PageBuilder) error {
             "ad":       ad,
             "seller":   getSeller(ad.SellerID),
             "category": getCategory(ad.CategoryID),
-        }).Subscribe("ad:"+ad.ID, "seller:"+ad.SellerID)
+        }).DependsOn("ad:"+ad.ID, "seller:"+ad.SellerID)
     }
 
     // Categories
@@ -645,7 +645,7 @@ hs.SetBuilder(func(ctx context.Context, b *hotstatic.PageBuilder) error {
         b.Page("pages/category.jinja2", "/categories/"+cat.ID+".html", map[string]any{
             "category": cat,
             "ads":      getAdsByCategory(cat.ID),
-        }).Subscribe("category:"+cat.ID)
+        }).DependsOn("category:"+cat.ID)
     }
 
     return nil
