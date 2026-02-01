@@ -201,23 +201,25 @@ func main() {
 
 	// Product pages
 	hs.DefineTemplate("product", hotstatic.TemplateDef{
-		File:   "pages/product.jinja2",
-		Output: "/products/{id}.html",
+		File: "pages/product.jinja2",
 
-		Load: func(ctx context.Context, id string) (map[string]any, error) {
+		Load: func(ctx context.Context, id string) (*hotstatic.PageData, error) {
 			product := getProduct(id)
 			if product == nil || !product.InStock {
 				return nil, nil // skip inactive products
 			}
 
-			return map[string]any{
-				"product":  product,
-				"category": getCategory(product.CategoryID),
-				"brand":    getBrand(product.BrandID),
-				"breadcrumb": []map[string]string{
-					{"label": "Home", "url": "/"},
-					{"label": product.CategoryName, "url": "/categories/" + product.CategoryID + ".html"},
-					{"label": product.Name, "url": ""},
+			return &hotstatic.PageData{
+				Path: fmt.Sprintf("/products/%s.html", id),
+				Data: map[string]any{
+					"product":  product,
+					"category": getCategory(product.CategoryID),
+					"brand":    getBrand(product.BrandID),
+					"breadcrumb": []map[string]string{
+						{"label": "Home", "url": "/"},
+						{"label": product.CategoryName, "url": "/categories/" + product.CategoryID + ".html"},
+						{"label": product.Name, "url": ""},
+					},
 				},
 			}, nil
 		},
@@ -229,21 +231,23 @@ func main() {
 
 	// Category pages
 	hs.DefineTemplate("category", hotstatic.TemplateDef{
-		File:   "pages/category.jinja2",
-		Output: "/categories/{id}.html",
+		File: "pages/category.jinja2",
 
-		Load: func(ctx context.Context, id string) (map[string]any, error) {
+		Load: func(ctx context.Context, id string) (*hotstatic.PageData, error) {
 			category := getCategory(id)
 			if category == nil {
 				return nil, nil
 			}
 
-			return map[string]any{
-				"category": category,
-				"products": getProductsByCategory(id),
-				"breadcrumb": []map[string]string{
-					{"label": "Home", "url": "/"},
-					{"label": category.Name, "url": ""},
+			return &hotstatic.PageData{
+				Path: fmt.Sprintf("/categories/%s.html", id),
+				Data: map[string]any{
+					"category": category,
+					"products": getProductsByCategory(id),
+					"breadcrumb": []map[string]string{
+						{"label": "Home", "url": "/"},
+						{"label": category.Name, "url": ""},
+					},
 				},
 			}, nil
 		},
@@ -255,13 +259,15 @@ func main() {
 
 	// Home page
 	hs.DefineTemplate("home", hotstatic.TemplateDef{
-		File:   "pages/home.jinja2",
-		Output: "/index.html",
+		File: "pages/home.jinja2",
 
-		Load: func(ctx context.Context, id string) (map[string]any, error) {
-			return map[string]any{
-				"featured":   getFeaturedProducts(),
-				"categories": getAllCategories(),
+		Load: func(ctx context.Context, id string) (*hotstatic.PageData, error) {
+			return &hotstatic.PageData{
+				Path: "/index.html",
+				Data: map[string]any{
+					"featured":   getFeaturedProducts(),
+					"categories": getAllCategories(),
+				},
 			}, nil
 		},
 
@@ -272,11 +278,13 @@ func main() {
 
 	// 404 page
 	hs.DefineTemplate("404", hotstatic.TemplateDef{
-		File:   "pages/404.jinja2",
-		Output: "/404.html",
+		File: "pages/404.jinja2",
 
-		Load: func(ctx context.Context, id string) (map[string]any, error) {
-			return map[string]any{}, nil
+		Load: func(ctx context.Context, id string) (*hotstatic.PageData, error) {
+			return &hotstatic.PageData{
+				Path: "/404.html",
+				Data: map[string]any{},
+			}, nil
 		},
 
 		LoadAll: func(ctx context.Context) ([]string, error) {
@@ -315,7 +323,7 @@ func main() {
 				if catID, ok := event.Metadata["category_id"].(string); ok {
 					categoryID = catID
 				}
-				hs.Delete("product", event.ID)
+				hs.Delete(fmt.Sprintf("/products/%s.html", event.ID))
 				hs.Build("home", "")
 				if categoryID != "" {
 					hs.Build("category", categoryID)

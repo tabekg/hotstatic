@@ -46,17 +46,19 @@ func main() {
 
     // Define templates
     hs.DefineTemplate("product", hotstatic.TemplateDef{
-        File:   "pages/product.jinja2",
-        Output: "/products/{id}.html",
+        File: "pages/product.jinja2",
 
-        Load: func(ctx context.Context, id string) (map[string]any, error) {
+        Load: func(ctx context.Context, id string) (*hotstatic.PageData, error) {
             product := db.GetProduct(id)
             if product == nil {
                 return nil, nil // skip
             }
-            return map[string]any{
-                "product":  product,
-                "category": db.GetCategory(product.CategoryID),
+            return &hotstatic.PageData{
+                Path: fmt.Sprintf("/products/%s.html", id),
+                Data: map[string]any{
+                    "product":  product,
+                    "category": db.GetCategory(product.CategoryID),
+                },
             }, nil
         },
 
@@ -66,12 +68,14 @@ func main() {
     })
 
     hs.DefineTemplate("home", hotstatic.TemplateDef{
-        File:   "pages/home.jinja2",
-        Output: "/index.html",
+        File: "pages/home.jinja2",
 
-        Load: func(ctx context.Context, id string) (map[string]any, error) {
-            return map[string]any{
-                "featured": db.GetFeaturedProducts(),
+        Load: func(ctx context.Context, id string) (*hotstatic.PageData, error) {
+            return &hotstatic.PageData{
+                Path: "/index.html",
+                Data: map[string]any{
+                    "featured": db.GetFeaturedProducts(),
+                },
             }, nil
         },
 
@@ -91,7 +95,7 @@ func main() {
             case "updated":
                 hs.Build("product", event.ID)
             case "deleted":
-                hs.Delete("product", event.ID)
+                hs.Delete(fmt.Sprintf("/products/%s.html", event.ID))
                 hs.Build("home", "")
             }
         }
@@ -164,17 +168,17 @@ hs.DefineTemplate("product", hotstatic.TemplateDef{
     // Template file (relative to TemplateDir)
     File: "pages/product.jinja2",
 
-    // Output path pattern ({id} is replaced)
-    Output: "/products/{id}.html",
-
     // Load data for a single page
-    // Return nil to skip (e.g., deleted entity)
-    Load: func(ctx context.Context, id string) (map[string]any, error) {
+    // Returns *PageData with Path and Data, or nil to skip
+    Load: func(ctx context.Context, id string) (*hotstatic.PageData, error) {
         product := db.GetProduct(id)
         if product == nil {
-            return nil, nil
+            return nil, nil // skip deleted/inactive
         }
-        return map[string]any{"product": product}, nil
+        return &hotstatic.PageData{
+            Path: fmt.Sprintf("/products/%s.html", id),
+            Data: map[string]any{"product": product},
+        }, nil
     },
 
     // Load all IDs for BuildAll
@@ -210,9 +214,9 @@ hs.OnEvent(func(ctx context.Context, event hotstatic.Event) error {
 
         case "deleted":
             // Product removed: delete page, update lists
-            hs.Delete("product", event.ID)
+            hs.Delete(fmt.Sprintf("/products/%s.html", event.ID))
             hs.Build("home", "")
-            hs.Build("category", event.Metadata["category_id"])
+            hs.Build("category", event.Metadata["category_id"].(string))
         }
 
     case "category":
@@ -261,10 +265,10 @@ Workers process the queue, call `Load()`, render template, write file.
 
 ### Delete
 
-Removes a generated page:
+Removes a generated page by path:
 
 ```go
-hs.Delete("product", "123")
+hs.Delete("/products/123.html")
 ```
 
 ### Emit

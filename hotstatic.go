@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -110,28 +109,15 @@ func (hs *HotStatic) BuildWithPriority(template string, id string, priority int)
 	})
 }
 
-// Delete removes a generated page.
-func (hs *HotStatic) Delete(template string, id string) error {
-	hs.mu.RLock()
-	def, ok := hs.templates[template]
-	hs.mu.RUnlock()
-
-	if !ok {
-		return fmt.Errorf("template not found: %s", template)
-	}
-
-	outputPath := hs.buildOutputPath(def.Output, id)
-	fullPath := filepath.Join(hs.config.OutputDir, outputPath)
+// Delete removes a generated page by path.
+func (hs *HotStatic) Delete(path string) error {
+	fullPath := filepath.Join(hs.config.OutputDir, path)
 
 	if err := os.Remove(fullPath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 
-	hs.config.Logger.Info("deleted page",
-		"template", template,
-		"id", id,
-		"output", outputPath,
-	)
+	hs.config.Logger.Info("deleted page", "path", path)
 
 	return nil
 }
@@ -368,13 +354,13 @@ func (hs *HotStatic) buildPage(ctx context.Context, template string, id string) 
 		return fmt.Errorf("template %s has no Load function", template)
 	}
 
-	// Load data
-	data, err := def.Load(ctx, id)
+	// Load page data
+	pageData, err := def.Load(ctx, id)
 	if err != nil {
 		return fmt.Errorf("load data: %w", err)
 	}
 
-	if data == nil {
+	if pageData == nil {
 		// nil means skip (e.g., deleted or inactive entity)
 		hs.config.Logger.Debug("skipped (no data)",
 			"template", template,
@@ -383,27 +369,19 @@ func (hs *HotStatic) buildPage(ctx context.Context, template string, id string) 
 		return nil
 	}
 
-	// Build output path
-	outputPath := hs.buildOutputPath(def.Output, id)
-
 	// Build page
-	if err := builder.Build(ctx, def.File, outputPath, data); err != nil {
+	if err := builder.Build(ctx, def.File, pageData.Path, pageData.Data); err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
 
 	hs.config.Logger.Debug("built page",
 		"template", template,
 		"id", id,
-		"output", outputPath,
+		"output", pageData.Path,
 		"duration", time.Since(start),
 	)
 
 	return nil
-}
-
-// buildOutputPath replaces {id} placeholder in output pattern.
-func (hs *HotStatic) buildOutputPath(pattern string, id string) string {
-	return strings.ReplaceAll(pattern, "{id}", id)
 }
 
 // slogAdapter wraps slog.Logger to implement Logger interface.

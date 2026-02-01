@@ -31,17 +31,24 @@ func (e Event) Key() string {
 	return e.Type + ":" + e.ID
 }
 
+// PageData contains data for rendering a page and its output path.
+type PageData struct {
+	// Path is the output file path (e.g., "/products/123.html" or "/ru/products/my-product.html")
+	Path string
+
+	// Data is the template data
+	Data map[string]any
+}
+
 // TemplateDef defines a template and how to load data for it.
 type TemplateDef struct {
 	// File is the template file path relative to TemplateDir (e.g., "pages/product.jinja2")
 	File string
 
-	// Output is the path pattern for generated pages (e.g., "/products/{id}.html")
-	Output string
-
 	// Load fetches data for a single page by ID.
 	// Returns nil to skip (e.g., deleted or inactive entity).
-	Load func(ctx context.Context, id string) (map[string]any, error)
+	// The returned PageData contains both the output path and template data.
+	Load func(ctx context.Context, id string) (*PageData, error)
 
 	// LoadAll returns all IDs for initial BuildAll.
 	// Called once at startup to build all pages of this template.
