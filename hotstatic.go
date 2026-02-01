@@ -64,6 +64,10 @@ type Config struct {
 	// Used by StaticHandler when serving files.
 	NotFoundPage string
 
+	// CacheRules defines caching behavior for static files.
+	// Rules are checked in order, first match wins.
+	CacheRules []CacheRule
+
 	// Workers count for parallel building
 	Workers int
 

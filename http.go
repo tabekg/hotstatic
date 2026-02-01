@@ -2,11 +2,17 @@ package hotstatic
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
+
+	"github.com/cespare/xxhash/v2"
 )
 
 // HTTPHandler provides HTTP endpoints for HotStatic.
@@ -248,10 +254,22 @@ func (h *HTTPHandler) getSubscriberCount(key string) int {
 	return len(subs)
 }
 
-// StaticHandler serves generated static files with custom 404 page support.
+// CacheRule defines caching behavior for files matching a pattern.
+type CacheRule struct {
+	Pattern        string // regex for URL/path
+	MaxAge         int    // seconds (0 = no-cache)
+	Immutable      bool   // add immutable directive
+	MustRevalidate bool   // add must-revalidate directive
+	Private        bool   // use private instead of public
+
+	compiled *regexp.Regexp
+}
+
+// StaticHandler serves generated static files with custom 404 page and caching support.
 type StaticHandler struct {
 	outputDir    string
 	notFoundPage string
+	cacheRules   []CacheRule
 }
 
 // NewStaticHandler creates a static file server.
@@ -264,9 +282,27 @@ func NewStaticHandler(outputDir string, notFoundPage string) *StaticHandler {
 	}
 }
 
-// StaticHandler returns a static file handler using OutputDir and NotFoundPage from config.
+// NewStaticHandlerWithCache creates a static file server with cache rules.
+func NewStaticHandlerWithCache(outputDir string, notFoundPage string, cacheRules []CacheRule) *StaticHandler {
+	// Compile regex patterns
+	compiled := make([]CacheRule, len(cacheRules))
+	for i, rule := range cacheRules {
+		compiled[i] = rule
+		if rule.Pattern != "" {
+			compiled[i].compiled, _ = regexp.Compile(rule.Pattern)
+		}
+	}
+
+	return &StaticHandler{
+		outputDir:    outputDir,
+		notFoundPage: notFoundPage,
+		cacheRules:   compiled,
+	}
+}
+
+// StaticHandler returns a static file handler using config from HotStatic.
 func (hs *HotStatic) StaticHandler() *StaticHandler {
-	return NewStaticHandler(hs.config.OutputDir, hs.config.NotFoundPage)
+	return NewStaticHandlerWithCache(hs.config.OutputDir, hs.config.NotFoundPage, hs.config.CacheRules)
 }
 
 // ServeHTTP implements http.Handler.
@@ -279,12 +315,69 @@ func (s *StaticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	fullPath := s.outputDir + path
 
 	// Check if file exists
-	if _, err := http.Dir(s.outputDir).Open(path); err != nil {
+	file, err := os.Open(fullPath)
+	if err != nil {
+		s.serve404(w, r)
+		return
+	}
+	defer file.Close()
+
+	stat, err := file.Stat()
+	if err != nil || stat.IsDir() {
 		s.serve404(w, r)
 		return
 	}
 
+	// Generate ETag based on file size and mod time
+	etag := s.generateETag(stat)
+	w.Header().Set("ETag", etag)
+
+	// Check If-None-Match
+	if match := r.Header.Get("If-None-Match"); match == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	// Apply cache rules
+	s.applyCacheHeaders(w, path)
+
 	http.ServeFile(w, r, fullPath)
+}
+
+func (s *StaticHandler) generateETag(stat os.FileInfo) string {
+	hash := xxhash.Sum64String(fmt.Sprintf("%d-%d", stat.Size(), stat.ModTime().UnixNano()))
+	return fmt.Sprintf(`"%x"`, hash)
+}
+
+func (s *StaticHandler) applyCacheHeaders(w http.ResponseWriter, path string) {
+	for _, rule := range s.cacheRules {
+		if rule.compiled != nil && rule.compiled.MatchString(path) {
+			var parts []string
+
+			if rule.Private {
+				parts = append(parts, "private")
+			} else {
+				parts = append(parts, "public")
+			}
+
+			if rule.MaxAge > 0 {
+				parts = append(parts, "max-age="+strconv.Itoa(rule.MaxAge))
+			} else {
+				parts = append(parts, "no-cache")
+			}
+
+			if rule.Immutable {
+				parts = append(parts, "immutable")
+			}
+
+			if rule.MustRevalidate {
+				parts = append(parts, "must-revalidate")
+			}
+
+			w.Header().Set("Cache-Control", strings.Join(parts, ", "))
+			return
+		}
+	}
 }
 
 func (s *StaticHandler) serve404(w http.ResponseWriter, r *http.Request) {

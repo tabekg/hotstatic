@@ -102,6 +102,13 @@ hotstatic.Config{
     // Custom 404 page (relative to OutputDir)
     NotFoundPage:  "404.html",
 
+    // Cache rules for static files
+    CacheRules: []hotstatic.CacheRule{
+        {Pattern: `\.[a-f0-9]{8}\.(css|js)$`, MaxAge: 31536000, Immutable: true},
+        {Pattern: `\.(png|jpg|svg|webp)$`, MaxAge: 86400},
+        {Pattern: `\.html$`, MaxAge: 0, MustRevalidate: true},
+    },
+
     // Performance
     Workers:       4,                 // parallel workers
     QueueSize:     10000,             // queue size
@@ -319,6 +326,50 @@ hotstatic.Config{
 ```
 
 Now any non-existent URL will show your custom 404 page with HTTP status 404.
+
+### Cache Rules
+
+Configure caching behavior per file type using regex patterns:
+
+```go
+hotstatic.Config{
+    CacheRules: []hotstatic.CacheRule{
+        {
+            Pattern:   `\.[a-f0-9]{8}\.(css|js)$`,  // hashed assets
+            MaxAge:    31536000,                     // 1 year
+            Immutable: true,
+        },
+        {
+            Pattern: `\.(png|jpg|jpeg|gif|svg|webp|ico)$`,  // images
+            MaxAge:  86400,                                  // 1 day
+        },
+        {
+            Pattern:        `\.html$`,  // HTML pages
+            MaxAge:         0,          // no-cache
+            MustRevalidate: true,
+        },
+    },
+}
+```
+
+**CacheRule fields:**
+
+| Field | Description |
+|-------|-------------|
+| `Pattern` | Regex to match URL path |
+| `MaxAge` | Cache duration in seconds (0 = no-cache) |
+| `Immutable` | Add `immutable` directive |
+| `MustRevalidate` | Add `must-revalidate` directive |
+| `Private` | Use `private` instead of `public` |
+
+**Result headers:**
+```
+style.a1b2c3d4.css → Cache-Control: public, max-age=31536000, immutable
+logo.png           → Cache-Control: public, max-age=86400
+index.html         → Cache-Control: public, no-cache, must-revalidate
+```
+
+Rules are checked in order — first match wins. ETag is generated automatically for all files using xxHash.
 
 ## HTTP API
 
