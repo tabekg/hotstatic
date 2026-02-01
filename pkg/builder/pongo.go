@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -49,41 +48,18 @@ func NewPongoBuilder(cfg PongoConfig) (*PongoBuilder, error) {
 	return b, nil
 }
 
-// LoadTemplates loads all templates from the template directory.
+// LoadTemplates reloads all templates from the template directory.
+// Creates a new template set to clear cache.
 func (b *PongoBuilder) LoadTemplates() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	// Create new template set to clear pongo2 cache
+	loader := pongo2.MustNewLocalFileSystemLoader(b.templateDir)
+	b.templateSet = pongo2.NewSet("hotstatic", loader)
 	b.templates = make(map[string]*pongo2.Template)
 
-	return filepath.WalkDir(b.templateDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if d.IsDir() {
-			return nil
-		}
-
-		ext := filepath.Ext(path)
-		if ext != ".html" && ext != ".htm" && ext != ".jinja2" && ext != ".j2" {
-			return nil
-		}
-
-		relPath, err := filepath.Rel(b.templateDir, path)
-		if err != nil {
-			return err
-		}
-
-		tmpl, err := b.templateSet.FromFile(relPath)
-		if err != nil {
-			return fmt.Errorf("parse template %s: %w", relPath, err)
-		}
-
-		b.templates[relPath] = tmpl
-
-		return nil
-	})
+	return nil
 }
 
 // RegisterTemplate adds a template from string content.
