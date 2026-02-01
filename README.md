@@ -104,33 +104,35 @@ hs.DefineTemplate("product", hotstatic.TemplateDef{
 })
 ```
 
-### Build
+### Build vs Queue
 
-Build a single page synchronously:
+Two ways to build pages:
+
+| | Build | Queue |
+|---|-------|-------|
+| **Type** | Sync (blocks) | Async (returns immediately) |
+| **Debounce** | No | Yes |
+| **Error handling** | Returns error | Logs error |
+| **Use case** | Single page, need result | Mass updates, webhooks |
+
+**Build** - synchronous, waits for completion:
 
 ```go
-err := hs.Build(ctx, "product", "123")
+err := hs.Build(ctx, "product", "123") // blocks until done
+if err != nil {
+    // handle error
+}
 ```
 
-### Queue
-
-Add page to build queue (async, with debounce):
+**Queue** - asynchronous, adds to queue with debounce:
 
 ```go
-hs.Queue("product", "123")
-hs.Queue("product", "123") // debounced, won't build twice
-```
-
-### Start / Stop
-
-Start and stop workers for queue processing:
-
-```go
-hs.Start()
+hs.Start() // start workers first
 defer hs.Stop()
 
-// Now Queue() will be processed by workers
-hs.Queue("product", "123")
+hs.Queue("product", "123") // returns immediately
+hs.Queue("product", "456") // workers process in parallel
+hs.Queue("product", "123") // debounced - skipped if queued recently
 ```
 
 ### BuildAll
