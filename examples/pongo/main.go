@@ -115,198 +115,170 @@ func init() {
 }
 
 func main() {
+	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// Check dev mode
+	devMode := os.Getenv("MODE") == "dev" || os.Getenv("MODE") == "development"
 
 	// Initialize HotStatic with pongo2 (Django-like templates)
 	hs, err := hotstatic.NewWithPongo(hotstatic.Config{
-		Redis:       "localhost:6379",
-		TemplateDir: "./templates",
-		OutputDir:   "./dist",
-		Workers:     4,
-		Logger:      logger,
+		Redis:        "localhost:6379",
+		TemplateDir:  "./templates",
+		OutputDir:    "./dist",
+		NotFoundPage: "404.html",
+		DevMode:      devMode,
+		CacheRules: []hotstatic.CacheRule{
+			{Pattern: `\.[a-f0-9]{8}\.(css|js)$`, MaxAge: 31536000, Immutable: true},
+			{Pattern: `\.(png|jpg|svg|webp|ico)$`, MaxAge: 86400},
+			{Pattern: `\.html$`, MaxAge: 0, MustRevalidate: true},
+		},
+		Workers: 4,
+		Logger:  logger,
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer hs.Stop()
 
-	// Start processing
+	// Define how to build all pages
+	hs.SetBuilder(func(ctx context.Context, b *hotstatic.PageBuilder) error {
+		// Static pages (no data needed)
+		b.Page("pages/404.jinja2", "/404.html", nil)
+
+		// Home page
+		b.Page("pages/home.jinja2", "/index.html", map[string]any{
+			"featured_products": getFeaturedProducts(),
+			"categories":        getCategories(),
+			"active_nav":        "home",
+		}).Subscribe("home:index")
+
+		// Product pages
+		for id, product := range products {
+			b.Page("pages/product.jinja2", "/products/"+id+".html", map[string]any{
+				"product":    product,
+				"active_nav": product.CategoryID,
+				"breadcrumb": []map[string]string{
+					{"label": "Home", "url": "/"},
+					{"label": product.CategoryName, "url": "/categories/" + product.CategoryID + ".html"},
+					{"label": product.Name, "url": ""},
+				},
+			}).Subscribe("product:"+product.ID, "brand:"+product.BrandID)
+		}
+
+		// Category pages
+		for id, category := range categories {
+			categoryProducts := getProductsByCategory(id)
+			b.Page("pages/category.jinja2", "/categories/"+id+".html", map[string]any{
+				"category":   category,
+				"products":   categoryProducts,
+				"active_nav": id,
+				"breadcrumb": []map[string]string{
+					{"label": "Home", "url": "/"},
+					{"label": category.Name, "url": ""},
+				},
+			}).Subscribe("category:" + id)
+		}
+
+		return nil
+	})
+
+	// Build all pages at startup
+	fmt.Println("Building pages...")
+	if err := hs.BuildAll(ctx); err != nil {
+		log.Fatal(err)
+	}
+
+	// Start dev mode (watch for template changes)
+	if devMode {
+		fmt.Println("Dev mode enabled - watching for template changes")
+		if err := hs.StartDevMode(ctx); err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	// Start workers for event-driven rebuilds
 	hs.Start()
 
-	ctx := context.Background()
+	fmt.Println("\nStats:", hs.Stats())
 
-	// Generate all pages
-	fmt.Println("🚀 Generating pages...")
-
-	// Generate product pages
-	for id, product := range products {
-		data, subs := getProductPageData(product)
-		err := hs.GeneratePongoPage(ctx, hotstatic.Page{
-			Path:          "/products/" + id + ".html",
-			Template:      "pages/product.html",
-			Subscriptions: subs,
-			Params:        map[string]string{"id": id},
-		}, data)
-		if err != nil {
-			log.Printf("generate product %s: %v", id, err)
-		}
-	}
-	fmt.Printf("   ✓ Generated %d product pages\n", len(products))
-
-	// Generate category pages
-	for categoryID := range categories {
-		data, subs, err := getCategoryPageData(categoryID)
-		if err != nil {
-			log.Printf("get category data %s: %v", categoryID, err)
-			continue
-		}
-		err = hs.GeneratePongoPage(ctx, hotstatic.Page{
-			Path:          "/categories/" + categoryID + ".html",
-			Template:      "pages/category.html",
-			Subscriptions: subs,
-			Params:        map[string]string{"id": categoryID},
-		}, data)
-		if err != nil {
-			log.Printf("generate category %s: %v", categoryID, err)
-		}
-	}
-	fmt.Printf("   ✓ Generated %d category pages\n", len(categories))
-
-	// Generate home page
-	homeData, homeSubs := getHomePageData()
-	err = hs.GeneratePongoPage(ctx, hotstatic.Page{
-		Path:          "/index.html",
-		Template:      "pages/home.html",
-		Subscriptions: homeSubs,
-		Params:        map[string]string{},
-	}, homeData)
-	if err != nil {
-		log.Printf("generate home: %v", err)
-	}
-	fmt.Println("   ✓ Generated home page")
-
-	fmt.Println("\n📊 Stats:", hs.Stats())
-
-	// HTTP API
-	handler := hotstatic.NewHTTPHandler(hs.HotStatic)
-
+	// HTTP server
 	mux := http.NewServeMux()
+
+	// API endpoints
+	handler := hotstatic.NewHTTPHandler(hs.HotStatic)
 	mux.Handle("/api/", handler.Router())
 
-	// Serve static assets (JS, CSS, images)
+	// Serve static assets
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("./static"))))
 
-	// Serve generated pages
-	mux.Handle("/", http.FileServer(http.Dir("./dist")))
+	// Serve generated pages with custom 404
+	mux.Handle("/", hs.StaticHandler())
 
-	fmt.Println("\n🌐 Server running on http://localhost:8080")
-	fmt.Println("\n📄 Pages:")
-	fmt.Println("   http://localhost:8080/index.html")
-	fmt.Println("   http://localhost:8080/products/1.html")
-	fmt.Println("   http://localhost:8080/categories/phones.html")
-	fmt.Println("\n🔌 API:")
-	fmt.Println("   POST /api/events - emit event")
-	fmt.Println("   GET  /api/stats  - statistics")
-	fmt.Println("\n💡 Try updating a product:")
-	fmt.Println("   curl -X POST http://localhost:8080/api/events \\")
-	fmt.Println("        -H 'Content-Type: application/json' \\")
-	fmt.Println("        -d '{\"type\":\"product\",\"id\":\"1\",\"action\":\"updated\"}'")
+	fmt.Println("\nServer running on http://localhost:8080")
+	fmt.Println("\nPages:")
+	fmt.Println("  http://localhost:8080/")
+	fmt.Println("  http://localhost:8080/products/1.html")
+	fmt.Println("  http://localhost:8080/categories/phones.html")
+	fmt.Println("\nAPI:")
+	fmt.Println("  POST /api/events - emit event")
+	fmt.Println("  GET  /api/stats  - statistics")
+	fmt.Println("\nTry updating a product:")
+	fmt.Println("  curl -X POST http://localhost:8080/api/events \\")
+	fmt.Println("       -H 'Content-Type: application/json' \\")
+	fmt.Println("       -d '{\"type\":\"product\",\"id\":\"1\",\"action\":\"updated\"}'")
 
-	// HTTP сервер с graceful shutdown
+	if devMode {
+		fmt.Println("\nDev mode: Edit templates and see changes automatically!")
+	}
+
+	// Graceful shutdown
 	server := &http.Server{
 		Addr:    ":8080",
 		Handler: mux,
 	}
 
-	// Канал для сигналов завершения
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	// Demo: emit event after 5 seconds
 	go func() {
 		time.Sleep(5 * time.Second)
-		fmt.Println("\n⚡ Auto-emitting product update event...")
+		fmt.Println("\nAuto-emitting product update event...")
 		product := products["1"]
-		data, _ := getProductPageData(product)
-		hs.EmitWithPayload("product:1", "updated", data)
+		hs.EmitWithPayload("product:1", "updated", map[string]any{
+			"product":    product,
+			"active_nav": product.CategoryID,
+			"breadcrumb": []map[string]string{
+				{"label": "Home", "url": "/"},
+				{"label": product.CategoryName, "url": "/categories/" + product.CategoryID + ".html"},
+				{"label": product.Name, "url": ""},
+			},
+		})
 	}()
 
-	// Запуск сервера в горутине
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}
 	}()
 
-	// Ожидание сигнала завершения
 	<-quit
-	fmt.Println("\n🛑 Shutting down...")
+	fmt.Println("\nShutting down...")
 
-	// Контекст с таймаутом для graceful shutdown
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Остановка HTTP сервера
-	if err := server.Shutdown(ctx); err != nil {
+	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("server shutdown error: %v", err)
 	}
 
-	// HotStatic останавливается через defer hs.Stop()
-	fmt.Println("✅ Shutdown complete")
+	fmt.Println("Shutdown complete")
 }
 
-// Helper functions to prepare page data
+// Helper functions
 
-func getProductPageData(product Product) (map[string]any, []string) {
-	data := map[string]any{
-		"product":    product,
-		"active_nav": product.CategoryID,
-		"breadcrumb": []map[string]string{
-			{"label": "Home", "url": "/"},
-			{"label": product.CategoryName, "url": "/categories/" + product.CategoryID + ".html"},
-			{"label": product.Name, "url": ""},
-		},
-	}
-	subscriptions := []string{
-		"product:" + product.ID,
-		"brand:" + product.BrandID,
-		"category:" + product.CategoryID,
-	}
-	return data, subscriptions
-}
-
-func getCategoryPageData(categoryID string) (map[string]any, []string, error) {
-	category, ok := categories[categoryID]
-	if !ok {
-		return nil, nil, fmt.Errorf("category not found: %s", categoryID)
-	}
-
-	var categoryProducts []Product
-	for _, p := range products {
-		if p.CategoryID == categoryID {
-			categoryProducts = append(categoryProducts, p)
-		}
-	}
-
-	data := map[string]any{
-		"category":   category,
-		"products":   categoryProducts,
-		"active_nav": categoryID,
-		"breadcrumb": []map[string]string{
-			{"label": "Home", "url": "/"},
-			{"label": category.Name, "url": ""},
-		},
-	}
-
-	subs := []string{"category:" + categoryID}
-	for _, p := range categoryProducts {
-		subs = append(subs, "product:"+p.ID)
-	}
-
-	return data, subs, nil
-}
-
-func getHomePageData() (map[string]any, []string) {
+func getFeaturedProducts() []Product {
 	var featured []Product
 	for _, p := range products {
 		if p.InStock {
@@ -316,25 +288,23 @@ func getHomePageData() (map[string]any, []string) {
 			}
 		}
 	}
+	return featured
+}
 
+func getCategories() []Category {
 	var cats []Category
 	for _, cat := range categories {
 		cats = append(cats, cat)
 	}
+	return cats
+}
 
-	data := map[string]any{
-		"featured_products": featured,
-		"categories":        cats,
-		"active_nav":        "home",
-	}
-
-	subs := []string{"home:index"}
+func getProductsByCategory(categoryID string) []Product {
+	var result []Product
 	for _, p := range products {
-		subs = append(subs, "product:"+p.ID)
+		if p.CategoryID == categoryID {
+			result = append(result, p)
+		}
 	}
-	for id := range categories {
-		subs = append(subs, "category:"+id)
-	}
-
-	return data, subs
+	return result
 }
