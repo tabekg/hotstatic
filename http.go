@@ -305,6 +305,13 @@ func (hs *HotStatic) StaticHandler() *StaticHandler {
 	return NewStaticHandlerWithCache(hs.config.OutputDir, hs.config.NotFoundPage, hs.config.CacheRules)
 }
 
+// FileServerWithCache returns a file server handler with cache rules applied.
+// Use this for serving static assets (JS, CSS, images) with proper caching.
+// Example: mux.Handle("/static/", http.StripPrefix("/static/", hs.FileServerWithCache("./dist/static")))
+func (hs *HotStatic) FileServerWithCache(dir string) http.Handler {
+	return NewStaticHandlerWithCache(dir, "", hs.config.CacheRules)
+}
+
 // ServeHTTP implements http.Handler.
 func (s *StaticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
