@@ -3,11 +3,15 @@ package hotstatic
 import (
 	"context"
 	"fmt"
+	"io/fs"
+	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/flosch/pongo2/v6"
+	"github.com/fsnotify/fsnotify"
 	"github.com/tabekg/hotstatic/pkg/builder"
 	"github.com/tabekg/hotstatic/pkg/registry"
 	"github.com/tabekg/hotstatic/pkg/worker"
@@ -28,11 +32,97 @@ type PongoPageConfig struct {
 	Priority int
 }
 
+// BuilderFunc is called to build all pages.
+// It's invoked at startup and on template changes in dev mode.
+type BuilderFunc func(ctx context.Context, b *PageBuilder) error
+
+// PageBuilder provides methods to build pages.
+type PageBuilder struct {
+	phs *PongoHotStatic
+	ctx context.Context
+}
+
+// Page builds a single page and returns PageBuildResult for chaining.
+func (pb *PageBuilder) Page(template, output string, data map[string]any) *PageBuildResult {
+	if data == nil {
+		data = make(map[string]any)
+	}
+	data["_path"] = output
+	data["_generated_at"] = time.Now()
+
+	result, err := pb.phs.pongoBuilder.Build(pb.ctx, template, output, data)
+
+	pbr := &PageBuildResult{
+		phs:      pb.phs,
+		ctx:      pb.ctx,
+		template: template,
+		output:   output,
+		err:      err,
+	}
+
+	if err == nil {
+		pbr.contentHash = result.ContentHash
+		pb.phs.logger.Debug("built page",
+			slog.String("template", template),
+			slog.String("output", output),
+		)
+	} else {
+		pb.phs.logger.Error("build page failed",
+			slog.String("template", template),
+			slog.String("output", output),
+			slog.String("error", err.Error()),
+		)
+	}
+
+	return pbr
+}
+
+// PageBuildResult allows chaining Subscribe calls.
+type PageBuildResult struct {
+	phs         *PongoHotStatic
+	ctx         context.Context
+	template    string
+	output      string
+	contentHash string
+	err         error
+}
+
+// Subscribe registers subscriptions for this page.
+// When events matching these keys are emitted, the page will be rebuilt.
+func (pbr *PageBuildResult) Subscribe(keys ...string) *PageBuildResult {
+	if pbr.err != nil {
+		return pbr
+	}
+
+	err := pbr.phs.registry.Subscribe(pbr.ctx, registry.PageMeta{
+		Path:          pbr.output,
+		Template:      "pongo:" + pbr.template,
+		Subscriptions: keys,
+		LastBuilt:     time.Now(),
+		ContentHash:   pbr.contentHash,
+	})
+	if err != nil {
+		pbr.phs.logger.Error("subscribe failed",
+			slog.String("output", pbr.output),
+			slog.String("error", err.Error()),
+		)
+		pbr.err = err
+	}
+
+	return pbr
+}
+
+// Error returns any error that occurred during build or subscribe.
+func (pbr *PageBuildResult) Error() error {
+	return pbr.err
+}
+
 // PongoHotStatic extends HotStatic with pongo2 support.
 type PongoHotStatic struct {
 	*HotStatic
 	pongoBuilder *builder.PongoBuilder
 	pongoConfigs map[string]*PongoPageConfig
+	builderFunc  BuilderFunc
 	mu           sync.RWMutex
 }
 
@@ -188,6 +278,207 @@ func (phs *PongoHotStatic) AddGlobal(name string, value any) {
 // ReloadTemplates reloads all templates from disk.
 func (phs *PongoHotStatic) ReloadTemplates() error {
 	return phs.pongoBuilder.LoadTemplates()
+}
+
+// SetBuilder sets the builder function that defines how pages are built.
+// This function is called at startup (BuildAll) and on template changes in dev mode.
+func (phs *PongoHotStatic) SetBuilder(fn BuilderFunc) {
+	phs.mu.Lock()
+	defer phs.mu.Unlock()
+	phs.builderFunc = fn
+}
+
+// BuildAll executes the builder function to build all pages.
+// Call this at startup after SetBuilder.
+func (phs *PongoHotStatic) BuildAll(ctx context.Context) error {
+	phs.mu.RLock()
+	fn := phs.builderFunc
+	phs.mu.RUnlock()
+
+	if fn == nil {
+		return fmt.Errorf("builder function not set, call SetBuilder first")
+	}
+
+	pb := &PageBuilder{
+		phs: phs,
+		ctx: ctx,
+	}
+
+	return fn(ctx, pb)
+}
+
+// BuildStaticPages builds all static pages from StaticPagesDir.
+// Scans the directory for templates and builds each one.
+// Example: templates/pages/about.jinja2 → /about.html
+func (phs *PongoHotStatic) BuildStaticPages(ctx context.Context) error {
+	if phs.config.StaticPagesDir == "" {
+		return nil
+	}
+
+	templateDir := phs.pongoBuilder.TemplateDir()
+	pagesDir := filepath.Join(templateDir, phs.config.StaticPagesDir)
+
+	count := 0
+	err := filepath.WalkDir(pagesDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+
+		ext := filepath.Ext(path)
+		if ext != ".html" && ext != ".htm" && ext != ".jinja2" && ext != ".j2" {
+			return nil
+		}
+
+		// Get relative path from template dir (e.g., "pages/about.jinja2")
+		relPath, err := filepath.Rel(templateDir, path)
+		if err != nil {
+			return err
+		}
+
+		// Get relative path from pages dir (e.g., "about.jinja2" or "sub/page.jinja2")
+		relFromPages, err := filepath.Rel(pagesDir, path)
+		if err != nil {
+			return err
+		}
+
+		// Convert to output path: about.jinja2 → /about.html
+		outputPath := "/" + strings.TrimSuffix(relFromPages, ext) + ".html"
+
+		data := map[string]any{
+			"_path":         outputPath,
+			"_generated_at": time.Now(),
+		}
+
+		_, err = phs.pongoBuilder.Build(ctx, relPath, outputPath, data)
+		if err != nil {
+			return fmt.Errorf("build static page %s: %w", outputPath, err)
+		}
+
+		phs.logger.Debug("built static page",
+			slog.String("output", outputPath),
+			slog.String("template", relPath),
+		)
+		count++
+
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	phs.logger.Info("built static pages", slog.Int("count", count))
+	return nil
+}
+
+// StartDevMode starts file watcher for templates and static files.
+// On any change, all static pages are rebuilt.
+func (phs *PongoHotStatic) StartDevMode(ctx context.Context) error {
+	if !phs.config.DevMode {
+		return nil
+	}
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return fmt.Errorf("create watcher: %w", err)
+	}
+
+	templateDir := phs.pongoBuilder.TemplateDir()
+
+	// Watch template directory recursively
+	err = filepath.WalkDir(templateDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return watcher.Add(path)
+		}
+		return nil
+	})
+	if err != nil {
+		watcher.Close()
+		return fmt.Errorf("watch template dir: %w", err)
+	}
+
+	phs.logger.Info("dev mode started",
+		slog.String("watching", templateDir),
+		slog.String("static_pages_dir", phs.config.StaticPagesDir),
+	)
+
+	go phs.watchLoop(ctx, watcher)
+
+	return nil
+}
+
+func (phs *PongoHotStatic) watchLoop(ctx context.Context, watcher *fsnotify.Watcher) {
+	defer watcher.Close()
+
+	// Debounce
+	var pending bool
+	var pendingMu sync.Mutex
+	var lastEvent time.Time
+	debounceDelay := 100 * time.Millisecond
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+
+			// Handle write, create, remove events
+			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove) == 0 {
+				continue
+			}
+
+			pendingMu.Lock()
+			pending = true
+			lastEvent = time.Now()
+			pendingMu.Unlock()
+
+		case <-ticker.C:
+			pendingMu.Lock()
+			if pending && time.Since(lastEvent) >= debounceDelay {
+				pending = false
+				pendingMu.Unlock()
+				phs.rebuildAll(ctx)
+			} else {
+				pendingMu.Unlock()
+			}
+
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			phs.logger.Error("watcher error", slog.String("error", err.Error()))
+		}
+	}
+}
+
+func (phs *PongoHotStatic) rebuildAll(ctx context.Context) {
+	phs.logger.Info("file changed, rebuilding pages")
+
+	// Reload templates to pick up changes
+	if err := phs.ReloadTemplates(); err != nil {
+		phs.logger.Error("reload templates failed", slog.String("error", err.Error()))
+		return
+	}
+
+	// Rebuild all pages using builder function
+	if phs.builderFunc != nil {
+		if err := phs.BuildAll(ctx); err != nil {
+			phs.logger.Error("rebuild pages failed", slog.String("error", err.Error()))
+		}
+	}
 }
 
 // pongoBuildHandler handles page rebuild jobs for both pongo and standard pages.

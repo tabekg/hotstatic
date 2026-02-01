@@ -39,45 +39,59 @@ import (
 )
 
 func main() {
+    ctx := context.Background()
+
     // Initialize
     hs, err := hotstatic.NewWithPongo(hotstatic.Config{
         Redis:       "localhost:6379",
         TemplateDir: "./templates",
         OutputDir:   "./dist",
-        Workers:     4,
+        DevMode:     true,  // enable file watching
     })
     if err != nil {
         log.Fatal(err)
     }
     defer hs.Stop()
 
-    // Start workers
+    // Define how to build all pages
+    hs.SetBuilder(func(ctx context.Context, b *hotstatic.PageBuilder) error {
+        // Static pages (no data needed)
+        b.Page("pages/about.jinja2", "/about.html", nil)
+        b.Page("pages/404.jinja2", "/404.html", nil)
+
+        // Pages with data
+        products := getProducts()
+        for _, p := range products {
+            b.Page("pages/product.jinja2", "/products/"+p.ID+".html", map[string]any{
+                "product": p,
+            }).Subscribe("product:"+p.ID, "brand:"+p.BrandID)
+        }
+
+        categories := getCategories()
+        for _, c := range categories {
+            b.Page("pages/category.jinja2", "/categories/"+c.ID+".html", map[string]any{
+                "category": c,
+                "products": getProductsByCategory(c.ID),
+            }).Subscribe("category:"+c.ID)
+        }
+
+        return nil
+    })
+
+    // Build all pages at startup
+    if err := hs.BuildAll(ctx); err != nil {
+        log.Fatal(err)
+    }
+
+    // Start file watcher (in dev mode, rebuilds on template changes)
+    hs.StartDevMode(ctx)
+
+    // Start workers for event-driven rebuilds
     hs.Start()
-
-    ctx := context.Background()
-
-    // Generate a page with data
-    data := map[string]any{
-        "product": Product{ID: "1", Name: "iPhone 15", Price: 999},
-        "brand":   "Apple",
-    }
-    
-    subscriptions := []string{
-        "product:1",    // page depends on this product
-        "brand:apple",  // and this brand
-    }
-
-    err = hs.GeneratePongoPage(ctx, hotstatic.Page{
-        Path:          "/products/1.html",
-        Template:      "pages/product.html",
-        Subscriptions: subscriptions,
-        Params:        map[string]string{"id": "1"},
-    }, data)
 
     // When data changes — emit event with new data
     hs.EmitWithPayload("product:1", "updated", map[string]any{
-        "product": Product{ID: "1", Name: "iPhone 15 Pro", Price: 1099},
-        "brand":   "Apple",
+        "product": updatedProduct,
     })
     // All pages subscribed to "product:1" will rebuild automatically
 }
@@ -102,6 +116,9 @@ hotstatic.Config{
     // Custom 404 page (relative to OutputDir)
     NotFoundPage:  "404.html",
 
+    // Development mode (auto-rebuild on template changes)
+    DevMode:       true,
+
     // Cache rules for static files
     CacheRules: []hotstatic.CacheRule{
         {Pattern: `\.[a-f0-9]{8}\.(css|js)$`, MaxAge: 31536000, Immutable: true},
@@ -120,25 +137,39 @@ hotstatic.Config{
 
 ## API
 
-### Generate a Page
+### SetBuilder — Define How Pages Are Built
 
 ```go
-// Data for template
-data := map[string]any{
-    "product": product,
-    "brand":   brand,
-}
+hs.SetBuilder(func(ctx context.Context, b *hotstatic.PageBuilder) error {
+    // Static page (no data)
+    b.Page("pages/about.jinja2", "/about.html", nil)
 
-// Subscriptions (page rebuilds when these keys change)
-subscriptions := []string{"product:123", "brand:apple"}
+    // Page with data
+    b.Page("pages/product.jinja2", "/products/1.html", map[string]any{
+        "product": product,
+    })
 
-// Generate
-err := hs.GeneratePongoPage(ctx, hotstatic.Page{
-    Path:          "/products/123.html",
-    Template:      "pages/product.html",
-    Subscriptions: subscriptions,
-    Params:        map[string]string{"id": "123"},
-}, data)
+    // Page with data and subscriptions (for event-driven rebuilds)
+    b.Page("pages/product.jinja2", "/products/1.html", map[string]any{
+        "product": product,
+    }).Subscribe("product:1", "brand:apple")
+
+    return nil
+})
+```
+
+### BuildAll — Build All Pages
+
+```go
+// Called at startup and automatically in dev mode on template changes
+err := hs.BuildAll(ctx)
+```
+
+### StartDevMode — Watch Templates for Changes
+
+```go
+// Watches template directory, calls BuildAll on any change
+err := hs.StartDevMode(ctx)
 ```
 
 ### Emit Event (Trigger Rebuild)
@@ -304,15 +335,13 @@ http.ListenAndServe(":8080", mux)
 {% endblock %}
 ```
 
-2. Generate 404 page at startup:
+2. Add to your builder:
 
 ```go
-err = hs.GeneratePongoPage(ctx, hotstatic.Page{
-    Path:          "/404.html",
-    Template:      "pages/404.jinja2",
-    Subscriptions: []string{}, // no subscriptions needed
-}, map[string]any{
-    "title": "Page Not Found",
+hs.SetBuilder(func(ctx context.Context, b *hotstatic.PageBuilder) error {
+    b.Page("pages/404.jinja2", "/404.html", nil)
+    // ... other pages
+    return nil
 })
 ```
 
@@ -556,48 +585,61 @@ my-site/
 ## Example: Classifieds Site
 
 ```go
-// Generate ad page
-func generateAdPage(ctx context.Context, ad Ad) error {
-    data := map[string]any{
-        "ad":       ad,
-        "seller":   getSeller(ad.SellerID),
-        "category": getCategory(ad.CategoryID),
-    }
-    
-    subscriptions := []string{
-        "ad:" + ad.ID,
-        "seller:" + ad.SellerID,
-        "category:" + ad.CategoryID,
-    }
-    
-    return hs.GeneratePongoPage(ctx, hotstatic.Page{
-        Path:          "/ads/" + ad.ID + ".html",
-        Template:      "pages/ad.html",
-        Subscriptions: subscriptions,
-        Params:        map[string]string{"id": ad.ID},
-    }, data)
-}
+// Define builder
+hs.SetBuilder(func(ctx context.Context, b *hotstatic.PageBuilder) error {
+    // Static pages
+    b.Page("pages/404.jinja2", "/404.html", nil)
+    b.Page("pages/about.jinja2", "/about.html", nil)
 
-// Ad updated
+    // All ads
+    ads := getAds()
+    for _, ad := range ads {
+        b.Page("pages/ad.jinja2", "/ads/"+ad.ID+".html", map[string]any{
+            "ad":       ad,
+            "seller":   getSeller(ad.SellerID),
+            "category": getCategory(ad.CategoryID),
+        }).Subscribe("ad:"+ad.ID, "seller:"+ad.SellerID)
+    }
+
+    // Categories
+    categories := getCategories()
+    for _, cat := range categories {
+        b.Page("pages/category.jinja2", "/categories/"+cat.ID+".html", map[string]any{
+            "category": cat,
+            "ads":      getAdsByCategory(cat.ID),
+        }).Subscribe("category:"+cat.ID)
+    }
+
+    return nil
+})
+
+// Build at startup
+hs.BuildAll(ctx)
+
+// Start dev mode (watch for template changes)
+hs.StartDevMode(ctx)
+
+// Start workers
+hs.Start()
+
+// When ad is updated
 func onAdUpdated(ad Ad) {
-    data := map[string]any{
+    hs.EmitWithPayload("ad:"+ad.ID, "updated", map[string]any{
         "ad":       ad,
         "seller":   getSeller(ad.SellerID),
         "category": getCategory(ad.CategoryID),
-    }
-    hs.EmitWithPayload("ad:"+ad.ID, "updated", data)
+    })
 }
 
-// Seller changed name → all their ads rebuild
+// When seller changes name → all their ads rebuild
 func onSellerUpdated(seller Seller) {
     ads := getAdsBySeller(seller.ID)
     for _, ad := range ads {
-        data := map[string]any{
+        hs.EmitWithPayload("ad:"+ad.ID, "updated", map[string]any{
             "ad":       ad,
             "seller":   seller,
             "category": getCategory(ad.CategoryID),
-        }
-        hs.EmitWithPayload("ad:"+ad.ID, "updated", data)
+        })
     }
 }
 ```

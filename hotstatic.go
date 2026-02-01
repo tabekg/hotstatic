@@ -68,6 +68,15 @@ type Config struct {
 	// Rules are checked in order, first match wins.
 	CacheRules []CacheRule
 
+	// StaticPagesDir is the directory containing static page templates (relative to TemplateDir).
+	// All templates in this directory are automatically built as static pages.
+	// Example: "pages" → templates/pages/*.jinja2 → /about.html, /contact.html, etc.
+	// Default: "" (disabled)
+	StaticPagesDir string
+
+	// DevMode enables file watching and auto-rebuild for static pages.
+	DevMode bool
+
 	// Workers count for parallel building
 	Workers int
 
