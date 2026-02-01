@@ -38,12 +38,15 @@ type BuilderFunc func(ctx context.Context, b *PageBuilder) error
 
 // PageBuilder provides methods to build pages.
 type PageBuilder struct {
-	phs *PongoHotStatic
-	ctx context.Context
+	phs   *PongoHotStatic
+	ctx   context.Context
+	count int
 }
 
 // Page builds a single page and returns PageBuildResult for chaining.
 func (pb *PageBuilder) Page(template, output string, data map[string]any) *PageBuildResult {
+	start := time.Now()
+
 	if data == nil {
 		data = make(map[string]any)
 	}
@@ -51,6 +54,7 @@ func (pb *PageBuilder) Page(template, output string, data map[string]any) *PageB
 	data["_generated_at"] = time.Now()
 
 	result, err := pb.phs.pongoBuilder.Build(pb.ctx, template, output, data)
+	duration := time.Since(start)
 
 	pbr := &PageBuildResult{
 		phs:      pb.phs,
@@ -62,10 +66,13 @@ func (pb *PageBuilder) Page(template, output string, data map[string]any) *PageB
 
 	if err == nil {
 		pbr.contentHash = result.ContentHash
-		pb.phs.logger.Debug("built page",
-			slog.String("template", template),
-			slog.String("output", output),
-		)
+		pb.count++
+		if pb.phs.config.DevMode {
+			pb.phs.logger.Info("built page",
+				slog.String("output", output),
+				slog.Duration("time", duration),
+			)
+		}
 	} else {
 		pb.phs.logger.Error("build page failed",
 			slog.String("template", template),
@@ -291,6 +298,8 @@ func (phs *PongoHotStatic) SetBuilder(fn BuilderFunc) {
 // BuildAll executes the builder function to build all pages.
 // Call this at startup after SetBuilder.
 func (phs *PongoHotStatic) BuildAll(ctx context.Context) error {
+	start := time.Now()
+
 	phs.mu.RLock()
 	fn := phs.builderFunc
 	phs.mu.RUnlock()
@@ -300,11 +309,22 @@ func (phs *PongoHotStatic) BuildAll(ctx context.Context) error {
 	}
 
 	pb := &PageBuilder{
-		phs: phs,
-		ctx: ctx,
+		phs:   phs,
+		ctx:   ctx,
+		count: 0,
 	}
 
-	return fn(ctx, pb)
+	err := fn(ctx, pb)
+	duration := time.Since(start)
+
+	if err == nil && phs.config.DevMode {
+		phs.logger.Info("build complete",
+			slog.Int("pages", pb.count),
+			slog.Duration("total", duration),
+		)
+	}
+
+	return err
 }
 
 // BuildStaticPages builds all static pages from StaticPagesDir.
