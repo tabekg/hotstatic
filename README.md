@@ -71,9 +71,25 @@ hs, err := hotstatic.NewWithPongo(hotstatic.Config{
     OutputDir:   "./dist",
     Workers:     4,              // parallel workers (default: 4)
     Debounce:    time.Second,    // debounce duration (default: 1s)
+    Minify:      true,           // minify HTML/CSS/JS (default: false)
     Logger:      myLogger,       // optional
 })
 ```
+
+### Minification
+
+When `Minify: true` is set, output files are automatically minified based on file extension:
+
+| Extension | Content Type |
+|-----------|--------------|
+| `.html`, `.htm` | HTML |
+| `.css` | CSS |
+| `.js` | JavaScript |
+| `.json` | JSON |
+| `.svg` | SVG |
+| `.xml` | XML |
+
+Uses [tdewolff/minify](https://github.com/tdewolff/minify) for minification.
 
 ### DefineTemplate
 

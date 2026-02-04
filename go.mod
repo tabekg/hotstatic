@@ -8,4 +8,8 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 )
 
-require golang.org/x/sys v0.34.0 // indirect
+require (
+	github.com/tdewolff/minify/v2 v2.24.8 // indirect
+	github.com/tdewolff/parse/v2 v2.8.5 // indirect
+	golang.org/x/sys v0.37.0 // indirect
+)

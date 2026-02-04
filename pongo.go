@@ -10,6 +10,13 @@ import (
 	"time"
 
 	"github.com/flosch/pongo2/v6"
+	"github.com/tdewolff/minify/v2"
+	"github.com/tdewolff/minify/v2/css"
+	"github.com/tdewolff/minify/v2/html"
+	"github.com/tdewolff/minify/v2/js"
+	"github.com/tdewolff/minify/v2/json"
+	"github.com/tdewolff/minify/v2/svg"
+	"github.com/tdewolff/minify/v2/xml"
 )
 
 // PongoBuilder implements Builder interface using pongo2 templates.
@@ -18,11 +25,12 @@ type PongoBuilder struct {
 	outputDir   string
 	templateSet *pongo2.TemplateSet
 	globals     map[string]any
+	minifier    *minify.M
 	mu          sync.RWMutex
 }
 
 // NewPongoBuilder creates a new pongo2 builder.
-func NewPongoBuilder(templateDir, outputDir string) (*PongoBuilder, error) {
+func NewPongoBuilder(templateDir, outputDir string, enableMinify bool) (*PongoBuilder, error) {
 	if templateDir == "" {
 		templateDir = "./templates"
 	}
@@ -38,6 +46,16 @@ func NewPongoBuilder(templateDir, outputDir string) (*PongoBuilder, error) {
 		outputDir:   outputDir,
 		templateSet: templateSet,
 		globals:     make(map[string]any),
+	}
+
+	if enableMinify {
+		pb.minifier = minify.New()
+		pb.minifier.AddFunc("text/html", html.Minify)
+		pb.minifier.AddFunc("text/css", css.Minify)
+		pb.minifier.AddFunc("application/javascript", js.Minify)
+		pb.minifier.AddFunc("application/json", json.Minify)
+		pb.minifier.AddFunc("image/svg+xml", svg.Minify)
+		pb.minifier.AddFunc("text/xml", xml.Minify)
 	}
 
 	// Register default filters
@@ -78,6 +96,17 @@ func (pb *PongoBuilder) Build(ctx context.Context, templateFile, outputPath stri
 		return fmt.Errorf("render template %s: %w", templateFile, err)
 	}
 
+	// Minify if enabled
+	if pb.minifier != nil {
+		mediaType := pb.detectMediaType(outputPath)
+		if mediaType != "" {
+			minified, err := pb.minifier.String(mediaType, content)
+			if err == nil {
+				content = minified
+			}
+		}
+	}
+
 	// Write to file
 	fullPath := filepath.Join(pb.outputDir, outputPath)
 
@@ -115,6 +144,26 @@ func (pb *PongoBuilder) Reload() error {
 	pb.templateSet = pongo2.NewSet("hotstatic", loader)
 
 	return nil
+}
+
+func (pb *PongoBuilder) detectMediaType(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".html", ".htm":
+		return "text/html"
+	case ".css":
+		return "text/css"
+	case ".js":
+		return "application/javascript"
+	case ".json":
+		return "application/json"
+	case ".svg":
+		return "image/svg+xml"
+	case ".xml":
+		return "text/xml"
+	default:
+		return ""
+	}
 }
 
 func (pb *PongoBuilder) registerDefaultFilters() {
@@ -181,7 +230,7 @@ type PongoHotStatic struct {
 
 // NewWithPongo creates HotStatic with pongo2 support.
 func NewWithPongo(cfg Config) (*PongoHotStatic, error) {
-	builder, err := NewPongoBuilder(cfg.TemplateDir, cfg.OutputDir)
+	builder, err := NewPongoBuilder(cfg.TemplateDir, cfg.OutputDir, cfg.Minify)
 	if err != nil {
 		return nil, err
 	}

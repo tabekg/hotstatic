@@ -43,6 +43,9 @@ type Config struct {
 	// Debounce duration - same page won't rebuild more than once per this duration (default: 1s)
 	Debounce time.Duration
 
+	// Minify enables HTML/CSS/JS minification (default: false)
+	Minify bool
+
 	// Logger instance (optional)
 	Logger Logger
 }
