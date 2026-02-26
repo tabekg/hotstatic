@@ -100,7 +100,16 @@ func (hs *HotStatic) SetBuilder(builder Builder) {
 
 // Build builds a single page synchronously.
 func (hs *HotStatic) Build(ctx context.Context, template string, id string) error {
-	return hs.buildPage(ctx, template, id)
+	start := time.Now()
+	if err := hs.buildPage(ctx, template, id); err != nil {
+		return err
+	}
+	hs.config.Logger.Debug("built",
+		"template", template,
+		"id", id,
+		"duration", time.Since(start).Round(time.Millisecond),
+	)
+	return nil
 }
 
 // Queue adds a page to the build queue (async, with debounce).
@@ -284,8 +293,6 @@ func (hs *HotStatic) GetTemplate(name string) (*TemplateDef, bool) {
 }
 
 func (hs *HotStatic) buildPage(ctx context.Context, template string, id string) error {
-	start := time.Now()
-
 	hs.mu.RLock()
 	def, ok := hs.templates[template]
 	builder := hs.builder
@@ -318,13 +325,6 @@ func (hs *HotStatic) buildPage(ctx context.Context, template string, id string) 
 	if err := builder.Build(ctx, def.File, pageData.Path, pageData.Data); err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
-
-	hs.config.Logger.Debug("built page",
-		"template", template,
-		"id", id,
-		"output", pageData.Path,
-		"duration", time.Since(start),
-	)
 
 	return nil
 }
