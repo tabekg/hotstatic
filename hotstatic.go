@@ -68,9 +68,14 @@ func New(cfg Config) *HotStatic {
 	if cfg.ProgressInterval <= 0 {
 		cfg.ProgressInterval = 500
 	}
+	if cfg.LogLevel == 0 {
+		cfg.LogLevel = LogInfo
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = &slogAdapter{slog.Default()}
 	}
+	// Wrap logger with level filtering
+	cfg.Logger = &levelLogger{inner: cfg.Logger, level: cfg.LogLevel}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -338,3 +343,30 @@ func (s *slogAdapter) Debug(msg string, args ...any) { s.Logger.Debug(msg, args.
 func (s *slogAdapter) Info(msg string, args ...any)  { s.Logger.Info(msg, args...) }
 func (s *slogAdapter) Warn(msg string, args ...any)  { s.Logger.Warn(msg, args...) }
 func (s *slogAdapter) Error(msg string, args ...any) { s.Logger.Error(msg, args...) }
+
+// levelLogger wraps a Logger and filters by LogLevel.
+type levelLogger struct {
+	inner Logger
+	level LogLevel
+}
+
+func (l *levelLogger) Debug(msg string, args ...any) {
+	if l.level >= LogDebug {
+		l.inner.Debug(msg, args...)
+	}
+}
+func (l *levelLogger) Info(msg string, args ...any) {
+	if l.level >= LogInfo {
+		l.inner.Info(msg, args...)
+	}
+}
+func (l *levelLogger) Warn(msg string, args ...any) {
+	if l.level >= LogWarn {
+		l.inner.Warn(msg, args...)
+	}
+}
+func (l *levelLogger) Error(msg string, args ...any) {
+	if l.level >= LogError {
+		l.inner.Error(msg, args...)
+	}
+}

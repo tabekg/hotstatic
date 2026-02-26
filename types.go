@@ -5,6 +5,22 @@ import (
 	"time"
 )
 
+// LogLevel controls verbosity of hotstatic logging.
+type LogLevel int
+
+const (
+	// LogSilent disables all logging
+	LogSilent LogLevel = -1
+	// LogError logs only errors
+	LogError LogLevel = 1
+	// LogWarn logs errors and warnings
+	LogWarn LogLevel = 2
+	// LogInfo logs errors, warnings, and info (progress, queue events). This is the default.
+	LogInfo LogLevel = 3
+	// LogDebug logs everything including per-page build details
+	LogDebug LogLevel = 4
+)
+
 // PageData contains data for rendering a page and its output path.
 type PageData struct {
 	// Path is the output file path (e.g., "/products/123.html" or "/ru/products/my-product.html")
@@ -50,7 +66,10 @@ type Config struct {
 	// For example, 500 means log every 500 pages built. (default: 500)
 	ProgressInterval int64
 
-	// Logger instance (optional)
+	// LogLevel controls verbosity. (default: LogInfo)
+	LogLevel LogLevel
+
+	// Logger instance (optional, defaults to slog)
 	Logger Logger
 }
 
