@@ -46,6 +46,10 @@ type Config struct {
 	// Minify enables HTML/CSS/JS minification (default: false)
 	Minify bool
 
+	// ProgressInterval controls how often progress is logged during queue processing.
+	// For example, 500 means log every 500 pages built. (default: 500)
+	ProgressInterval int64
+
 	// Logger instance (optional)
 	Logger Logger
 }

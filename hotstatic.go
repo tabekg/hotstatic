@@ -28,9 +28,10 @@ type HotStatic struct {
 
 	// Stats for progress logging
 	stats struct {
-		built   atomic.Int64
-		errors  atomic.Int64
-		startAt time.Time
+		built    atomic.Int64
+		errors   atomic.Int64
+		drained  atomic.Bool
+		startAt  time.Time
 	}
 
 	mu sync.RWMutex
@@ -63,6 +64,9 @@ func New(cfg Config) *HotStatic {
 	}
 	if cfg.Debounce <= 0 {
 		cfg.Debounce = time.Second
+	}
+	if cfg.ProgressInterval <= 0 {
+		cfg.ProgressInterval = 500
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = &slogAdapter{slog.Default()}
@@ -119,6 +123,9 @@ func (hs *HotStatic) Queue(template string, id string) {
 	hs.pending[key] = now
 	hs.pendingMu.Unlock()
 
+	// Reset drained flag when new work arrives
+	hs.stats.drained.Store(false)
+
 	// Non-blocking send to queue
 	select {
 	case hs.queue <- job:
@@ -139,6 +146,7 @@ func (hs *HotStatic) Start() {
 
 	hs.stats.built.Store(0)
 	hs.stats.errors.Store(0)
+	hs.stats.drained.Store(false)
 	hs.stats.startAt = time.Now()
 
 	for i := 0; i < hs.config.Workers; i++ {
@@ -185,7 +193,7 @@ func (hs *HotStatic) worker() {
 			)
 		} else {
 			n := hs.stats.built.Add(1)
-			if n%500 == 0 {
+			if n%hs.config.ProgressInterval == 0 {
 				hs.config.Logger.Info("progress",
 					"built", n,
 					"errors", hs.stats.errors.Load(),
@@ -193,6 +201,15 @@ func (hs *HotStatic) worker() {
 					"elapsed", time.Since(hs.stats.startAt).Round(time.Millisecond),
 				)
 			}
+		}
+
+		// Log once when queue drains
+		if len(hs.queue) == 0 && !hs.stats.drained.Swap(true) {
+			hs.config.Logger.Info("queue drained",
+				"built", hs.stats.built.Load(),
+				"errors", hs.stats.errors.Load(),
+				"elapsed", time.Since(hs.stats.startAt).Round(time.Millisecond),
+			)
 		}
 
 		// Clear from pending
