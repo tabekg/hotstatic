@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -24,6 +25,13 @@ type HotStatic struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	started   bool
+
+	// Stats for progress logging
+	stats struct {
+		built   atomic.Int64
+		errors  atomic.Int64
+		startAt time.Time
+	}
 
 	mu sync.RWMutex
 }
@@ -129,12 +137,16 @@ func (hs *HotStatic) Start() {
 	hs.started = true
 	hs.mu.Unlock()
 
+	hs.stats.built.Store(0)
+	hs.stats.errors.Store(0)
+	hs.stats.startAt = time.Now()
+
 	for i := 0; i < hs.config.Workers; i++ {
 		hs.wg.Add(1)
 		go hs.worker()
 	}
 
-	hs.config.Logger.Info("started", "workers", hs.config.Workers, "debounce", hs.config.Debounce)
+	hs.config.Logger.Info("queue started", "workers", hs.config.Workers)
 }
 
 // Stop stops workers gracefully.
@@ -142,7 +154,16 @@ func (hs *HotStatic) Stop() {
 	hs.cancel()
 	close(hs.queue)
 	hs.wg.Wait()
-	hs.config.Logger.Info("stopped")
+
+	built := hs.stats.built.Load()
+	errors := hs.stats.errors.Load()
+	if built > 0 || errors > 0 {
+		hs.config.Logger.Info("queue stopped",
+			"built", built,
+			"errors", errors,
+			"duration", time.Since(hs.stats.startAt).Round(time.Millisecond),
+		)
+	}
 }
 
 func (hs *HotStatic) worker() {
@@ -156,11 +177,22 @@ func (hs *HotStatic) worker() {
 		}
 
 		if err := hs.buildPage(hs.ctx, job.template, job.id); err != nil {
+			hs.stats.errors.Add(1)
 			hs.config.Logger.Error("build failed",
 				"template", job.template,
 				"id", job.id,
 				"error", err.Error(),
 			)
+		} else {
+			n := hs.stats.built.Add(1)
+			if n%500 == 0 {
+				hs.config.Logger.Info("progress",
+					"built", n,
+					"errors", hs.stats.errors.Load(),
+					"queued", len(hs.queue),
+					"elapsed", time.Since(hs.stats.startAt).Round(time.Millisecond),
+				)
+			}
 		}
 
 		// Clear from pending
